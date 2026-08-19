@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+
+# coil-core runtime state (never commit; .coil/config/ is committed)
+.coil/state/
+
+# AI assistant configs (do not commit)
+.codegraph/
+.cursor/
+.claude/
+.commandcode/
+.team/
+.playwright-mcp/
+
+# Coverage
+coverage/
