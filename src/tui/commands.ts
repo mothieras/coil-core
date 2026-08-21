@@ -28,23 +28,10 @@ export function applyTuiCommandResult(
         }),
       };
     case "compact":
-      return {
-        action: "continue",
-        state: appendInfoLog(state, {
-          id: `cmd:${idSeed}`,
-          title: "Compact",
-          detail: result.message,
-        }),
-      };
     case "report":
-      return {
-        action: "continue",
-        state: appendInfoLog(state, {
-          id: `cmd:${idSeed}`,
-          title: "Report",
-          detail: result.message,
-        }),
-      };
+      // Both actions emit structured view events. Appending a local notice here
+      // would print the same outcome twice in the transcript.
+      return { action: "continue", state };
     case "message":
       // Handled upstream (useSession runs the expanded text as a user turn);
       // nothing to log here.

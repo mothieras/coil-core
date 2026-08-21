@@ -28,8 +28,10 @@ export type LogItem = {
   title: string;
   role?: ConversationRole | undefined;
   status?: string | undefined;
+  summary?: string | undefined;
   detail?: string | undefined;
   source?: string | undefined;
+  durationMs?: number | undefined;
   timestamp?: string | undefined;
 };
 
@@ -221,13 +223,10 @@ function toolItem(t: ToolCallProjection): LogItem {
   const it: LogItem = { id: `tool:${t.id}`, kind: "tool", title: t.toolName, status: t.status };
   const ts = t.finishedAt ?? t.startedAt;
   if (ts !== undefined) it.timestamp = ts;
-  const detail = joinDetail([
-    t.inputSummary,
-    t.resultSummary,
-    t.error,
-    t.durationMs !== undefined ? `${t.durationMs}ms` : undefined,
-  ]);
-  if (detail !== undefined) it.detail = detail;
+  if (t.inputSummary !== undefined) it.summary = t.inputSummary;
+  if (t.error !== undefined) it.detail = t.error;
+  else if (t.resultSummary !== undefined) it.detail = t.resultSummary;
+  if (t.durationMs !== undefined) it.durationMs = t.durationMs;
   const src = formatToolSource(t.source);
   if (src !== undefined) it.source = src;
   return it;

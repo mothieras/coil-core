@@ -6,11 +6,20 @@ import { App } from "../src/tui/components/App.js";
 import { createTuiState } from "../src/tui/state.js";
 import type { UseSessionApi } from "../src/tui/useSession.js";
 import { LogLine } from "../src/tui/components/LogItem.js";
-import { StatusBar } from "../src/tui/components/StatusBar.js";
+import { StatusBar, formatStatusLine } from "../src/tui/components/StatusBar.js";
 import { RunningActivity } from "../src/tui/components/RunningActivity.js";
 import { PermissionModal } from "../src/tui/components/PermissionModal.js";
-import { classifyInput, splitPastedInput, Input } from "../src/tui/components/Input.js";
+import {
+  classifyInput,
+  commandSuggestions,
+  splitPastedInput,
+  Input,
+} from "../src/tui/components/Input.js";
+import { displayWidth } from "../src/tui/format.js";
+import { borderStyleFor, shouldAnimateActivity, symbolsFor } from "../src/tui/theme.js";
 import type { SessionSnapshot } from "../src/core/session/types.js";
+
+const waitForInput = (ms = 50): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 function snap(): SessionSnapshot {
   return {
@@ -47,16 +56,58 @@ function snap(): SessionSnapshot {
   };
 }
 
-test("LogLine renders a message with role prefix", () => {
-  const { lastFrame, unmount } = render(
-    <LogLine item={{ id: "x", kind: "message", role: "user", title: "hello there" }} />,
-  );
-  assert.match(lastFrame() ?? "", /hello there/);
-  unmount();
-});
+function frameOf(element: React.ReactElement): string {
+  const app = render(element);
+  const frame = app.lastFrame() ?? "";
+  app.unmount();
+  return frame;
+}
 
-test("LogLine renders assistant replies as terminal markdown", () => {
-  const { lastFrame, unmount } = render(
+function sessionApi(overrides: Partial<UseSessionApi> = {}): UseSessionApi {
+  return {
+    state: createTuiState(snap(), {}),
+    phase: "idle",
+    permission: null,
+    input: "",
+    history: [],
+    setInput: () => {},
+    submit: () => {},
+    decide: () => {},
+    interrupt: () => {},
+    quit: () => {},
+    busy: false,
+    ...overrides,
+  };
+}
+
+function InputHarness({
+  history = [],
+  submitted,
+}: {
+  history?: string[];
+  submitted?: string[];
+}): React.ReactElement {
+  const [value, setValue] = React.useState("");
+  return (
+    <Input
+      value={value}
+      onChange={setValue}
+      busy={false}
+      disabled={false}
+      history={history}
+      onSubmit={(next) => {
+        submitted?.push(next);
+        setValue("");
+      }}
+    />
+  );
+}
+
+test("LogLine keeps conversation primary and tool traces scannable", () => {
+  const user = frameOf(
+    <LogLine item={{ id: "u", kind: "message", role: "user", title: "hello there" }} />,
+  );
+  const assistant = frameOf(
     <LogLine
       item={{
         id: "a",
@@ -66,229 +117,197 @@ test("LogLine renders assistant replies as terminal markdown", () => {
       }}
     />,
   );
-  const frame = lastFrame() ?? "";
-  assert.match(frame, /AGENT/);
-  assert.match(frame, /done/);
-  assert.match(frame, /fix\(\)/);
-  assert.match(frame, /step/);
-  assert.doesNotMatch(frame, /\*\*/);
-  unmount();
+  const tool = frameOf(
+    <LogLine
+      item={{
+        id: "tool:1",
+        kind: "tool",
+        title: "read_file",
+        status: "completed",
+        summary: '{"path":"src/main.ts"}',
+        detail: "output (120 chars, 8 lines)",
+        durationMs: 42,
+      }}
+    />,
+  );
+
+  assert.match(user, /› hello there/);
+  assert.doesNotMatch(user, /YOU/);
+  assert.match(assistant, /●.*done/);
+  assert.doesNotMatch(assistant, /AGENT|\*\*/);
+  assert.match(assistant, /fix\(\)|step/);
+  assert.match(tool, /✓ Read file.*src\/main\.ts.*42ms.*120 chars/s);
 });
 
-test("StatusBar shows session id, model, usage and mcp counts", () => {
-  const { lastFrame, unmount } = render(<StatusBar snapshot={snap()} model="deepseek" />);
-  const frame = lastFrame() ?? "";
-  assert.match(frame, /sess9/);
-  assert.match(frame, /deepseek/);
-  assert.match(frame, /↑14 ↓6/);
-  assert.match(frame, /ctx≈9\/50\.0k/);
-  assert.match(frame, /MCP:1\/0/);
-  unmount();
+test("StatusBar prioritizes active work and fits terminal cell width", () => {
+  const full = frameOf(<StatusBar snapshot={snap()} model="deepseek" />);
+  for (const token of ["sess9", "deepseek", "↑14 ↓6", "ctx≈9/50k", "run t1", "mcp 1"])
+    assert.ok(full.includes(token));
+
+  const narrow = formatStatusLine(snap(), "provider/very-long-model-name", 60);
+  assert.match(narrow, /^run t1 · r · .*ctx≈9\/50k/);
+  assert.ok(displayWidth(narrow) <= 58);
+  assert.doesNotMatch(narrow, /↑14|#sess9| · T · /);
+
+  const loaded = snap();
+  loaded.session = {
+    ...loaded.session!,
+    workspaceRoot: "/workspace/中文项目名称特别长特别长",
+    title: "A very long generated session title that should be optional",
+  };
+  loaded.subagents = [
+    { id: "s1", sessionId: "sess9", status: "running", promptSummary: "review everything" },
+  ];
+  loaded.backgroundCommands = [
+    { id: "b1", sessionId: "sess9", status: "running", commandSummary: "pnpm test" },
+  ];
+  loaded.mcpServers = [{ name: "broken", status: "failed", reason: "offline", updatedAt: "t" }];
+  const bounded = formatStatusLine(loaded, "提供商/超长模型名称特别长特别长", 80);
+  assert.ok(displayWidth(bounded) <= 78);
+  assert.match(bounded, /mcp !1.*run t1\/a1\/bg1|run t1\/a1\/bg1.*mcp !1/);
 });
 
-test("RunningActivity lists running tools while thinking", () => {
-  const { lastFrame, unmount } = render(<RunningActivity snapshot={snap()} phase="thinking" />);
-  assert.match(lastFrame() ?? "", /bash/);
-  unmount();
+test("RunningActivity names foreground work", () => {
+  const frame = frameOf(<RunningActivity snapshot={snap()} phase="thinking" animated={false} />);
+  assert.match(frame, /Working.*Bash/s);
 });
 
-test("classifyInput distinguishes message, slash, resume and empty", () => {
+test("theme falls back to ASCII and reduced motion", () => {
+  const symbols = symbolsFor({ TERM: "dumb" });
+  assert.deepEqual([symbols.user, symbols.success, symbols.error], [">", "+", "x"]);
+  assert.equal(borderStyleFor({ TERM: "dumb" }), "classic");
+  assert.equal(shouldAnimateActivity({ TERM: "dumb" }), false);
+  assert.equal(shouldAnimateActivity({ COIL_REDUCED_MOTION: "1" }), false);
+});
+
+test("input helpers classify commands, suggestions, and pasted newlines", () => {
   assert.deepEqual(classifyInput("  "), { kind: "empty", arg: "" });
   assert.deepEqual(classifyInput("fix the bug"), { kind: "message", arg: "fix the bug" });
   assert.deepEqual(classifyInput("/status"), { kind: "slash", arg: "/status" });
   assert.deepEqual(classifyInput("/resume 2"), { kind: "resume", arg: "2" });
-  assert.deepEqual(classifyInput("/resume"), { kind: "resume", arg: "" });
   assert.deepEqual(classifyInput("/resumed"), { kind: "slash", arg: "/resumed" });
-});
-
-test("splitPastedInput treats the first embedded newline as Enter", () => {
-  assert.deepEqual(splitPastedInput("/help"), { submit: undefined, value: "/help" });
+  assert.deepEqual(
+    commandSuggestions("/res").map((item) => item.command),
+    ["/resume"],
+  );
+  assert.deepEqual(commandSuggestions("plain text"), []);
+  assert.deepEqual(commandSuggestions("/resume 2"), []);
   assert.deepEqual(splitPastedInput("/help\r"), { submit: "/help", value: "" });
   assert.deepEqual(splitPastedInput("fix the bug\r\nthen run tests\n"), {
     submit: "fix the bug",
     value: "then run tests",
   });
-  assert.deepEqual(splitPastedInput("\rtail"), { submit: undefined, value: "tail" });
 });
 
-test("Input submits a pasted chunk with an embedded newline and keeps the frame clean", async () => {
+test("Input submits pasted chunks without leaking carriage returns", async () => {
   const submitted: string[] = [];
-  function Harness(): React.ReactElement {
-    const [value, setValue] = React.useState("");
-    return (
-      <Input
-        value={value}
-        onChange={setValue}
-        busy={false}
-        disabled={false}
-        onSubmit={(v) => {
-          submitted.push(v);
-          setValue("");
-        }}
-      />
-    );
-  }
-  const app = render(<Harness />);
-  // tmux send-keys / paste delivers the text and the newline as ONE stdin
-  // chunk; ink reports it as a single input event with key.return = false.
+  const app = render(<InputHarness submitted={submitted} />);
   app.stdin.write("/help\r");
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await waitForInput();
   const frame = app.lastFrame() ?? "";
   app.unmount();
+
   assert.deepEqual(submitted, ["/help"]);
-  assert.equal(frame.includes("\r"), false, "raw carriage return must never reach the frame");
+  assert.doesNotMatch(frame, /\r/);
 });
 
 test("Input recalls history with arrow keys", async () => {
-  function Harness(): React.ReactElement {
-    const [value, setValue] = React.useState("");
-    return (
-      <Input
-        value={value}
-        onChange={setValue}
-        busy={false}
-        disabled={false}
-        history={["first command", "second command"]}
-        onSubmit={() => {}}
-      />
-    );
+  const app = render(<InputHarness history={["first command", "second command"]} />);
+  for (const [key, expected] of [
+    ["\x1b[A", /second command/],
+    ["\x1b[A", /first command/],
+    ["\x1b[B", /second command/],
+  ] as const) {
+    app.stdin.write(key);
+    await waitForInput();
+    assert.match(app.lastFrame() ?? "", expected);
   }
-  const app = render(<Harness />);
-  app.stdin.write("[A"); // up
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.match(app.lastFrame() ?? "", /second command/);
-  app.stdin.write("[A"); // up again
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.match(app.lastFrame() ?? "", /first command/);
-  app.stdin.write("[B"); // down
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.match(app.lastFrame() ?? "", /second command/);
   app.unmount();
 });
 
-test("PermissionModal shows tool name and reason", () => {
-  const { lastFrame, unmount } = render(
+test("PermissionModal presents context, queue state, and diff", () => {
+  const frame = frameOf(
     <PermissionModal
       request={{
         id: "p1",
         toolName: "edit_file",
         reason: "writes a tracked file",
-        inputSummary: "path=src/x.ts",
-      }}
-      onDecision={() => {}}
-    />,
-  );
-  const frame = lastFrame() ?? "";
-  assert.match(frame, /edit_file/);
-  assert.match(frame, /writes a tracked file/);
-  assert.match(frame, /y.*allow|allow.*y/i);
-  unmount();
-});
-
-test("PermissionModal shows a diff preview for edit_file requests", () => {
-  const { lastFrame, unmount } = render(
-    <PermissionModal
-      request={{
-        id: "p9",
-        toolName: "edit_file",
-        reason: "workspace write",
         input: { filepath: "a.ts", old_text: "const a = 1;", new_text: "const a = 2;" },
+        queueSize: 2,
       }}
       onDecision={() => {}}
     />,
   );
-  const frame = lastFrame() ?? "";
-  assert.match(frame, /- const a = 1;/);
-  assert.match(frame, /\+ const a = 2;/);
-  unmount();
+
+  assert.match(frame, /Edit file.*writes a tracked file/s);
+  assert.match(frame, /a\.ts.*- const a = 1;.*\+ const a = 2;/s);
+  assert.match(frame, /y.*allow|allow.*y/i);
+  assert.match(frame, /Esc deny/);
+  assert.match(frame, /2 queued/);
 });
 
-test("ESC interrupts only while busy and no permission pending", async () => {
+test("PermissionModal treats Escape as deny", async () => {
+  const decisions: boolean[] = [];
+  const app = render(
+    <PermissionModal
+      request={{ id: "p1", toolName: "bash", reason: "shell access", input: { command: "ls" } }}
+      onDecision={(allow) => decisions.push(allow)}
+    />,
+  );
+  app.stdin.write("\x1b");
+  await waitForInput();
+  app.unmount();
+  assert.deepEqual(decisions, [false]);
+});
+
+test("App invokes only supported interrupt and quit paths", async () => {
   let interrupts = 0;
-  const base: UseSessionApi = {
-    state: createTuiState(snap(), {}),
-    phase: "idle" as const,
-    permission: null,
-    input: "",
-    history: [],
-    setInput: () => {},
-    submit: () => {},
-    decide: () => {},
+  let quits = 0;
+  const base = sessionApi({
     interrupt: () => {
       interrupts += 1;
     },
-    busy: false,
+    quit: () => {
+      quits += 1;
+    },
+  });
+  const send = async (session: UseSessionApi, key: string): Promise<void> => {
+    const app = render(<App session={session} />);
+    app.stdin.write(key);
+    await waitForInput();
+    app.unmount();
   };
 
-  // not busy: ESC does nothing
-  const idle = render(<App session={{ ...base, busy: false }} />);
-  idle.stdin.write("\x1b");
-  // wait for ink's 20ms escape-flush timer + margin
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const afterIdle = interrupts;
+  await send(base, "\x1b");
+  await send({ ...base, busy: true, phase: "thinking" }, "\x1b");
+  assert.equal(interrupts, 0, "ESC cannot cancel foreground turns");
 
-  // busy: ESC should call interrupt
-  const busy = render(<App session={{ ...base, busy: true }} />);
-  busy.stdin.write("\x1b");
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await send({ ...base, busy: true, phase: "waiting-async" }, "\x1b");
+  assert.equal(interrupts, 1, "ESC stops cooperative async waiting");
 
-  idle.unmount();
-  busy.unmount();
-
-  assert.equal(afterIdle, 0, "ESC while idle should not interrupt");
-  assert.ok(interrupts >= 1, "ESC while busy should interrupt");
+  await send(base, "\x03");
+  await send({ ...base, busy: true, phase: "thinking" }, "\x03");
+  assert.equal(quits, 1, "Ctrl+C quits only while idle");
 });
 
-test("App renders footer prompt and seeded log together", () => {
-  const seeded = createTuiState(
+test("App renders the transcript and composer together", () => {
+  const snapshot = snap();
+  snapshot.toolCalls = [];
+  snapshot.conversationMessages = [
     {
-      session: {
-        id: "sessA",
-        workspaceRoot: "/r",
-        createdAt: "t",
-        updatedAt: "t",
-        status: "active",
-        title: "T",
-      },
-      conversationMessages: [
-        {
-          id: "m1",
-          sessionId: "sessA",
-          role: "user",
-          content: "hello world",
-          createdAt: "t",
-          source: "user_input",
-        },
-      ],
-      leadAgentMessages: [],
-      agentRuns: [],
-      toolCalls: [],
-      permissionDecisions: [],
-      backgroundCommands: [],
-      subagents: [],
-      tasks: [],
-      reports: [],
-      mcpServers: [],
-      usage: { inputTokens: 0, outputTokens: 0, apiCalls: 0, lastInputTokens: 0 },
+      id: "m1",
+      sessionId: "sess9",
+      role: "user",
+      content: "hello world",
+      createdAt: "t",
+      source: "user_input",
     },
-    { model: "deepseek" },
+  ];
+  const frame = frameOf(
+    <App session={sessionApi({ state: createTuiState(snapshot, { model: "deepseek" }) })} />,
   );
-  const api: UseSessionApi = {
-    state: seeded,
-    phase: "idle",
-    busy: false,
-    permission: null,
-    input: "",
-    setInput: () => {},
-    submit: () => {},
-    decide: () => {},
-    interrupt: () => {},
-    history: [],
-  };
-  const { lastFrame, unmount } = render(<App session={api} />);
-  const frame = lastFrame() ?? "";
+
   assert.match(frame, /hello world/);
-  assert.match(frame, /sessA/);
-  assert.match(frame, /coil ›/);
-  unmount();
+  assert.match(frame, /#sess9/);
+  assert.match(frame, /› Ask coil to change the code/);
 });

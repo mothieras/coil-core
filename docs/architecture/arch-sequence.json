@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "One Agent Turn",
+    "subtitle": "Runtime control flow: user message -> loop -> provider + tools -> result",
+    "viewBox": [980, 820]
+  },
+  "participants": [
+    { "id": "main", "type": "external", "label": "main.ts", "sublabel": "entry" },
+    { "id": "tui", "type": "frontend", "label": "runTui", "sublabel": "src/tui" },
+    { "id": "ctrl", "type": "backend", "label": "Controller", "sublabel": "session/controller" },
+    { "id": "runner", "type": "backend", "label": "Runner", "sublabel": "runUserTurn" },
+    { "id": "runtime", "type": "backend", "label": "AgentRuntime", "sublabel": "run" },
+    { "id": "loop", "type": "backend", "label": "agentLoop", "sublabel": "loop/loop" },
+    { "id": "provider", "type": "security", "label": "Provider", "sublabel": "messages.create" },
+    { "id": "tools", "type": "backend", "label": "ToolRuntime", "sublabel": "invokeTool" }
+  ],
+  "segments": [
+    { "from": 150, "to": 300, "label": "Intake" },
+    { "from": 320, "to": 560, "label": "Turn execution" },
+    { "from": 580, "to": 720, "label": "Response" }
+  ],
+  "messages": [
+    { "from": "main", "to": "tui", "y": 175, "label": "import runTui", "variant": "default" },
+    { "from": "tui", "to": "ctrl", "y": 218, "label": "handleUserMessage(text)", "variant": "emphasis" },
+    { "from": "ctrl", "to": "runner", "y": 258, "label": "runUserTurn" },
+    { "from": "runner", "to": "runtime", "y": 298, "label": "run(agent, run)" },
+    { "from": "runtime", "to": "loop", "y": 338, "label": "agentLoop(agent)", "note": "binds currentAgent" },
+    { "from": "loop", "to": "provider", "y": 388, "label": "messages.create", "variant": "emphasis" },
+    { "from": "provider", "to": "loop", "y": 428, "label": "Message", "variant": "return" },
+    { "from": "loop", "to": "tools", "y": 478, "label": "invokeTool (tool_use)", "variant": "emphasis" },
+    { "from": "tools", "to": "loop", "y": 518, "label": "result", "variant": "return" },
+    { "from": "loop", "to": "ctrl", "y": 568, "label": "AgentLoopResult", "variant": "return" },
+    { "from": "ctrl", "to": "tui", "y": 612, "label": "SessionTurnResult", "variant": "return" },
+    { "from": "tui", "to": "main", "y": 652, "label": "render", "variant": "return" }
+  ],
+  "activations": [
+    { "participant": "tui", "from": 213, "to": 657, "type": "frontend" },
+    { "participant": "ctrl", "from": 223, "to": 617, "type": "backend" },
+    { "participant": "runner", "from": 258, "to": 303, "type": "backend" },
+    { "participant": "runtime", "from": 298, "to": 343, "type": "backend" },
+    { "participant": "loop", "from": 338, "to": 573, "type": "backend" },
+    { "participant": "provider", "from": 388, "to": 433, "type": "security" },
+    { "participant": "tools", "from": 478, "to": 523, "type": "backend" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "Happy path", "items": ["One turn = user message -> loop -> provider -> tool -> result", "Return arrows are quieter than forward calls", "Activation bars show ownership duration"] },
+    { "dot": "rose", "title": "Invariants on this path", "items": ["agentLoop is the only currentAgent binder", "The TUI never calls the loop directly — only via SessionController", "The loop calls the injected Provider, never config"] },
+    { "dot": "cyan", "title": "Per turn", "items": ["PreLLMCall hook fires before every model call", "If stop_reason != tool_use the loop returns; Stop hook may force-continue"] }
+  ]
+}

@@ -58,7 +58,9 @@ test("logFromSnapshot seeds messages + finished tool calls in time order", () =>
       toolName: "read_file",
       status: "completed",
       finishedAt: "2026-01-01T00:00:02.000Z",
-      resultSummary: "ok",
+      inputSummary: '{"path":"src/main.ts"}',
+      resultSummary: "output (12 chars, 1 line)",
+      durationMs: 42,
     },
   ];
   const log = logFromSnapshot(snap);
@@ -68,6 +70,9 @@ test("logFromSnapshot seeds messages + finished tool calls in time order", () =>
   );
   assert.equal(log[0]?.title, "hi");
   assert.equal(log[1]?.title, "read_file");
+  assert.equal(log[1]?.summary, '{"path":"src/main.ts"}');
+  assert.equal(log[1]?.detail, "output (12 chars, 1 line)");
+  assert.equal(log[1]?.durationMs, 42);
 });
 
 test("applyTuiEvent appends assistant message and a finished tool, ignores running tool", () => {

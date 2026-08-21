@@ -28,3 +28,9 @@ dist/
 
 # Coverage
 coverage/
+
+# Design & product discussion (private; contains LLM design sessions)
+DESIGN.md
+PRODUCT.md
+.impeccable/
+artifacts/

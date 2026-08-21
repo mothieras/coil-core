@@ -25,14 +25,14 @@ test("exit command logs and requests exit", () => {
   assert.equal(out.state.log.at(-1)?.title, "Exiting");
 });
 
-test("compact and report results append info lines", () => {
+test("compact and report results do not duplicate their structured view events", () => {
+  const initial = createTuiState();
   let out = applyTuiCommandResult(
-    createTuiState(),
+    initial,
     { action: "compact", compacted: true, message: "Context compacted." },
     "c3",
   );
-  assert.equal(out.state.log.at(-1)?.title, "Compact");
-  assert.equal(out.state.log.at(-1)?.detail, "Context compacted.");
+  assert.equal(out.state.log.length, initial.log.length);
   out = applyTuiCommandResult(
     out.state,
     {
@@ -48,6 +48,5 @@ test("compact and report results append info lines", () => {
     },
     "c4",
   );
-  assert.equal(out.state.log.at(-1)?.title, "Report");
-  assert.equal(out.state.log.at(-1)?.detail, "Report written: /tmp/report.md");
+  assert.equal(out.state.log.length, initial.log.length);
 });

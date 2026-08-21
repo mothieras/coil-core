@@ -30,12 +30,14 @@ export type UseSessionApi = {
   submit: (v: string) => void;
   decide: (allow: boolean) => void;
   interrupt: () => void;
+  quit: () => void;
   history: readonly string[];
 };
 
 export function useSession(opts: UseSessionOptions): UseSessionApi {
   const controllerRef = useRef<SessionController>(opts.initialController);
   const unsubRef = useRef<(() => void) | null>(null);
+  const busyRef = useRef<boolean>(false);
   const interruptRef = useRef<boolean>(false);
   const seq = useRef<number>(0);
   const historyRef = useRef<string[]>([]);
@@ -69,7 +71,7 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
     bindController(controllerRef.current);
     return () => {
       unsubRef.current?.();
-      void controllerRef.current.close();
+      if (!busyRef.current) void controllerRef.current.close().catch(() => undefined);
     };
   }, []);
 
@@ -83,31 +85,57 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
     setState((s) => appendInfoLog(s, { id: nextId(), title: `${scope} error`, detail: message }));
   }
 
-  async function runMessage(text: string): Promise<void> {
+  function beginOperation(scope: string): boolean {
+    if (busyRef.current) {
+      setState((s) =>
+        appendInfoLog(s, {
+          id: nextId(),
+          title: scope,
+          detail: "Another operation is already running.",
+        }),
+      );
+      return false;
+    }
+    busyRef.current = true;
     setBusy(true);
+    return true;
+  }
+
+  function endOperation(): void {
+    busyRef.current = false;
+    setBusy(false);
+    setPhase("idle");
+  }
+
+  async function executeMessage(text: string): Promise<void> {
     interruptRef.current = false;
     try {
-      try {
-        await drainTurn(text, {
-          controller: controllerRef.current,
-          onPhase: setPhase,
-          shouldStop: () => interruptRef.current,
-        });
-      } catch (err) {
-        reportError("Turn", err);
-      }
+      await drainTurn(text, {
+        controller: controllerRef.current,
+        onPhase: setPhase,
+        shouldStop: () => interruptRef.current,
+      });
+    } catch (err) {
+      reportError("Turn", err);
+    }
+  }
+
+  async function runMessage(text: string): Promise<void> {
+    if (!beginOperation("Turn")) return;
+    try {
+      await executeMessage(text);
     } finally {
-      setBusy(false);
-      setPhase("idle");
+      endOperation();
     }
   }
 
   async function runSlash(command: string): Promise<void> {
+    if (!beginOperation("Command")) return;
     try {
       const result = await controllerRef.current.handleSlashCommand(command);
       if (result.action === "message") {
-        // Expanded .coil/commands template — run it as a normal user turn.
-        await runMessage(result.text);
+        // Expanded .coil/commands templates run under the same operation lock.
+        await executeMessage(result.text);
         return;
       }
       const id = nextId();
@@ -118,27 +146,20 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
       }
     } catch (err) {
       reportError("Command", err);
+    } finally {
+      endOperation();
     }
   }
 
   async function runResume(arg: string): Promise<void> {
+    if (!beginOperation("Resume")) return;
     try {
-      if (busy) {
-        setState((s) =>
-          appendInfoLog(s, {
-            id: nextId(),
-            title: "Resume",
-            detail: "Cannot switch sessions while a turn is running.",
-          }),
-        );
-        return;
-      }
       const items = await opts.store.listSessions();
       if (arg === "") {
         setState((s) =>
           appendInfoLog(s, {
             id: nextId(),
-            title: "Resume — pick a session",
+            title: "Resume: pick a session",
             detail: formatSessionList(items),
           }),
         );
@@ -155,26 +176,54 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
         );
         return;
       }
-      // hot-swap: load new providers FIRST — if this throws, the old session stays intact
+      if (target.id === controllerRef.current.getSnapshot().session?.id) {
+        setState((s) =>
+          appendInfoLog(s, {
+            id: nextId(),
+            title: "Resume",
+            detail: "That session is already active.",
+          }),
+        );
+        return;
+      }
+
+      // Build the next controller before disposing the current one. If loading
+      // the saved state fails, the current session remains fully usable.
       const providers = await opts.loadProviders();
-      // close old only after providers are ready
+      let next: SessionController;
+      try {
+        next = await SessionController.resume({
+          workspaceRoot: opts.workspaceRoot,
+          sessionId: target.id,
+          store: opts.store,
+          checkPermission: opts.checkPermission,
+          toolProviderResults: providers,
+        });
+      } catch (error) {
+        await closeProviderResults(providers);
+        throw error;
+      }
+
       unsubRef.current?.();
-      await controllerRef.current.close();
-      const next = await SessionController.resume({
-        workspaceRoot: opts.workspaceRoot,
-        sessionId: target.id,
-        store: opts.store,
-        checkPermission: opts.checkPermission,
-        toolProviderResults: providers,
-      });
+      try {
+        await controllerRef.current.close();
+      } catch (error) {
+        bindController(controllerRef.current);
+        await closeProviderResults(providers);
+        throw error;
+      }
       next.registerRuntimeHooks();
       controllerRef.current = next;
       bindController(next);
+      historyRef.current = [];
+      setInput("");
       setState(
         createTuiState(next.getSnapshot(), opts.model !== undefined ? { model: opts.model } : {}),
       );
     } catch (err) {
       reportError("Resume", err);
+    } finally {
+      endOperation();
     }
   }
 
@@ -184,6 +233,7 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
   }
 
   function submit(value: string): void {
+    if (busyRef.current) return;
     const c = classifyInput(value);
     setInput("");
     if (c.kind === "empty") return;
@@ -204,11 +254,24 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
   }
 
   function decide(allow: boolean): void {
-    opts.bridge.resolve(allow);
+    if (permission !== null) opts.bridge.resolve(permission.id, allow);
   }
 
   function interrupt(): void {
     interruptRef.current = true;
+  }
+
+  function quit(): void {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    void shutdown()
+      .then(() => opts.onExit?.())
+      .catch((error: unknown) => reportError("Exit", error))
+      .finally(() => {
+        busyRef.current = false;
+        setBusy(false);
+      });
   }
 
   return {
@@ -221,6 +284,17 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
     submit,
     decide,
     interrupt,
+    quit,
     history: historyRef.current,
   };
+}
+
+async function closeProviderResults(results: readonly ToolProviderLoadResult[]): Promise<void> {
+  for (const result of results) {
+    try {
+      await result.close?.();
+    } catch {
+      // Preserve the original resume error; provider cleanup is best effort.
+    }
+  }
 }

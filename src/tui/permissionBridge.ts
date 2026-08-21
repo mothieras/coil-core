@@ -4,11 +4,12 @@ export type PermissionRequest = {
   reason: string;
   inputSummary?: string | undefined;
   input?: Record<string, unknown> | undefined;
+  queueSize?: number | undefined;
 };
 
 export type PermissionBridge = {
   request(toolName: string, input: Record<string, unknown>, reason: string): Promise<boolean>;
-  resolve(allow: boolean): void;
+  resolve(requestId: string, allow: boolean): void;
   current(): PermissionRequest | null;
   subscribe(listener: () => void): () => void;
 };
@@ -28,6 +29,10 @@ export function createPermissionBridge(): PermissionBridge {
   const notify = (): void => {
     for (const l of listeners) l();
   };
+  const updateQueueSize = (): void => {
+    const current = queue[0];
+    if (current) current.req.queueSize = queue.length;
+  };
 
   return {
     request(toolName, input, reason) {
@@ -38,15 +43,17 @@ export function createPermissionBridge(): PermissionBridge {
       const promise = new Promise<boolean>((resolve) => {
         queue.push({ req, resolve });
       });
+      updateQueueSize();
       notify();
       return promise;
     },
-    resolve(allow) {
-      const head = queue.shift();
-      if (head) {
-        head.resolve(allow);
-        notify();
-      }
+    resolve(requestId, allow) {
+      const head = queue[0];
+      if (!head || head.req.id !== requestId) return;
+      queue.shift();
+      head.resolve(allow);
+      updateQueueSize();
+      notify();
     },
     current() {
       return queue[0]?.req ?? null;

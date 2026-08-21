@@ -13,6 +13,9 @@ import { useSession } from "./useSession.js";
 
 export async function runTui(): Promise<void> {
   const workspaceRoot = process.cwd();
+  // Resolve lazy provider configuration before creating runtime state so a
+  // setup error cannot leave an empty active session behind.
+  const model = getModel();
   const store = new SessionStore(workspaceRoot);
   const bridge = createPermissionBridge();
   const checkPermission: CheckPermissionFn = createPermissionChecker(
@@ -22,7 +25,7 @@ export async function runTui(): Promise<void> {
   const loadProviders = (): Promise<ToolProviderLoadResult[]> =>
     loadConfiguredMcpTools(workspaceRoot);
 
-  const providers = await loadConfiguredMcpTools(workspaceRoot);
+  const providers = await loadProviders();
   let controller: SessionController;
   try {
     controller = await SessionController.createNew({
@@ -35,27 +38,36 @@ export async function runTui(): Promise<void> {
     await closeProviders(providers);
     throw error;
   }
-  controller.registerRuntimeHooks();
 
-  function Root(): React.ReactElement {
-    const { exit } = useApp();
-    const session = useSession({
-      workspaceRoot,
-      store,
-      checkPermission,
-      bridge,
-      initialController: controller,
-      loadProviders,
-      onExit: () => exit(),
-      ...(getModel() !== undefined ? { model: getModel() } : {}),
+  try {
+    controller.registerRuntimeHooks();
+
+    function Root(): React.ReactElement {
+      const { exit } = useApp();
+      const session = useSession({
+        workspaceRoot,
+        store,
+        checkPermission,
+        bridge,
+        initialController: controller,
+        loadProviders,
+        onExit: () => exit(),
+        model,
+      });
+      return <App session={session} />;
+    }
+
+    const instance = render(<Root />, {
+      exitOnCtrlC: false,
+      kittyKeyboard: { mode: "disabled" },
     });
-    return <App session={session} />;
+    await instance.waitUntilExit();
+    // /exit and Ctrl+C both await useSession.shutdown() before Root requests exit.
+  } finally {
+    // Normal exits already close the active controller. This covers startup or
+    // render failures and is idempotent for the original controller.
+    await controller.close().catch(() => undefined);
   }
-
-  const instance = render(<Root />, { kittyKeyboard: { mode: "disabled" } });
-  await instance.waitUntilExit();
-  // useSession.shutdown() closes the active controller on /exit; ensure close on ctrl+c too:
-  // (idempotent: close() guards on already-closed status)
 }
 
 async function closeProviders(results: readonly ToolProviderLoadResult[]): Promise<void> {

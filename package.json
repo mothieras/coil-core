@@ -59,6 +59,7 @@
     "ink-text-input": "^6.0.0",
     "marked": "^18.0.5",
     "marked-terminal": "^7.3.0",
-    "react": "^19.2.0"
+    "react": "^19.2.0",
+    "string-width": "^8.2.2"
   }
 }

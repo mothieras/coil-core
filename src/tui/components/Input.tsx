@@ -1,18 +1,29 @@
 import React from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
+import { TUI_COLORS, TUI_SYMBOLS } from "../theme.js";
 
 export type InputClass = { kind: "empty" | "message" | "slash" | "resume"; arg: string };
 
 export type PastedInput = { submit: string | undefined; value: string };
 
-// A multi-character stdin chunk (paste, scripted input) reaches ink's useInput
-// as ONE event with any newline embedded in the text instead of a separate
-// return keypress, so ink-text-input inserts the raw "\r" into the value:
-// Enter never fires, and rendering the "\r" resets the cursor to column 0 and
-// corrupts the frame. Treat the first embedded newline as Enter — submit what
-// precedes it, keep the remainder (later newlines collapse to spaces; only one
-// turn can start per event anyway).
+export type CommandSuggestion = { command: string; description: string };
+
+const COMMANDS: readonly CommandSuggestion[] = [
+  { command: "/help", description: "show commands" },
+  { command: "/status", description: "session status" },
+  { command: "/tasks", description: "list tasks" },
+  { command: "/subagents", description: "list subagents" },
+  { command: "/resume", description: "switch session" },
+  { command: "/ping", description: "check provider" },
+  { command: "/compact", description: "compact context" },
+  { command: "/report", description: "write report" },
+  { command: "/exit", description: "save and quit" },
+];
+
+// A pasted multi-line stdin chunk reaches Ink as one event. Submit the first
+// line and keep the remaining text in the composer so raw carriage returns can
+// never corrupt the terminal frame.
 export function splitPastedInput(next: string): PastedInput {
   if (!/[\r\n]/.test(next)) return { submit: undefined, value: next };
   const index = next.search(/[\r\n]/);
@@ -34,6 +45,12 @@ export function classifyInput(text: string): InputClass {
   return { kind: "message", arg: trimmed };
 }
 
+export function commandSuggestions(value: string, limit = 3): CommandSuggestion[] {
+  const trimmed = value.trimStart();
+  if (!trimmed.startsWith("/") || trimmed.includes(" ")) return [];
+  return COMMANDS.filter((item) => item.command.startsWith(trimmed)).slice(0, limit);
+}
+
 export type InputProps = {
   value: string;
   onChange: (v: string) => void;
@@ -51,8 +68,8 @@ export function Input({
   disabled,
   history = [],
 }: InputProps): React.ReactElement {
-  // null = live buffer; otherwise an index into history being recalled.
   const historyIndex = React.useRef<number | null>(null);
+  const suggestions = disabled ? [] : commandSuggestions(value);
 
   useInput(
     (_input, key) => {
@@ -82,27 +99,37 @@ export function Input({
   );
 
   return (
-    <Box>
-      <Text color={busy ? "gray" : "cyan"}>coil › </Text>
-      {disabled ? (
-        <Text color="gray">{busy ? "(running… input paused)" : value}</Text>
-      ) : (
-        <TextInput
-          value={value}
-          onChange={(next) => {
-            historyIndex.current = null; // typing leaves history-recall mode
-            const pasted = splitPastedInput(next);
-            // Submit before onChange: the submit handler clears the buffer,
-            // and the later onChange call wins the batch with the remainder.
-            if (pasted.submit !== undefined) onSubmit(pasted.submit);
-            onChange(pasted.value);
-          }}
-          onSubmit={(v) => {
-            historyIndex.current = null;
-            onSubmit(v);
-          }}
-        />
-      )}
+    <Box flexDirection="column">
+      <Box>
+        <Text color={disabled ? TUI_COLORS.muted : TUI_COLORS.primary} bold>
+          {TUI_SYMBOLS.user}{" "}
+        </Text>
+        {disabled ? (
+          <Text color={TUI_COLORS.muted}>{busy ? "Input paused while the turn runs" : value}</Text>
+        ) : (
+          <TextInput
+            value={value}
+            placeholder="Ask coil to change the code"
+            onChange={(next) => {
+              historyIndex.current = null;
+              const pasted = splitPastedInput(next);
+              if (pasted.submit !== undefined) onSubmit(pasted.submit);
+              onChange(pasted.value);
+            }}
+            onSubmit={(next) => {
+              historyIndex.current = null;
+              onSubmit(next);
+            }}
+          />
+        )}
+      </Box>
+      {suggestions.map((suggestion) => (
+        <Text key={suggestion.command} color={TUI_COLORS.muted}>
+          {"  "}
+          <Text color={TUI_COLORS.primary}>{suggestion.command.padEnd(12)}</Text>
+          {suggestion.description}
+        </Text>
+      ))}
     </Box>
   );
 }

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatToolPreview } from "../src/tui/toolPreview.js";
+import { formatToolPreview, formatToolTarget } from "../src/tui/toolPreview.js";
 
 test("edit_file previews old/new lines as a diff", () => {
   const lines = formatToolPreview("edit_file", {
@@ -8,7 +8,7 @@ test("edit_file previews old/new lines as a diff", () => {
     old_text: "const a = 1;\nconst b = 2;",
     new_text: "const a = 1;\nconst b = 3;",
   });
-  assert.deepEqual(lines, ["- const a = 1;", "- const b = 2;", "+ const a = 1;", "+ const b = 3;"]);
+  assert.deepEqual(lines, ["  const a = 1;", "- const b = 2;", "+ const b = 3;"]);
 });
 
 test("edit_file preview caps long sides with a more-lines tail", () => {
@@ -33,4 +33,11 @@ test("bash previews the command; unknown tools have no preview", () => {
   assert.deepEqual(formatToolPreview("bash", { command: "rm -rf build" }), ["$ rm -rf build"]);
   assert.equal(formatToolPreview("subagent", { prompt: "x" }), null);
   assert.equal(formatToolPreview("edit_file", {}), null);
+});
+
+test("permission targets expose file, command, and subagent context", () => {
+  assert.equal(formatToolTarget("edit_file", { path: "src/a.ts" }), "src/a.ts");
+  assert.equal(formatToolTarget("write_file", { filepath: "src/b.ts" }), "src/b.ts");
+  assert.equal(formatToolTarget("bash", { command: "pnpm test" }), "pnpm test");
+  assert.equal(formatToolTarget("subagent", { task: "review TUI" }), "review TUI");
 });
