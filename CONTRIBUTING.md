@@ -1,6 +1,6 @@
 # Contributing to coil-core
 
-Thanks for helping. This guide gets a change from clone to merged.
+Thanks for helping. This guide walks a change from clone to merge.
 
 ## Setup
 
@@ -18,7 +18,7 @@ All of these must pass:
 ```bash
 pnpm typecheck            # tsc --noEmit on src/
 pnpm typecheck:tests      # tsc -p tsconfig.test.json
-pnpm test                 # node:test suite (222+ tests)
+pnpm test                 # node:test suite (221 tests)
 pnpm lint                 # ESLint + Prettier
 pnpm build                # tsc -> dist/
 ```

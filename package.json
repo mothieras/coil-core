@@ -37,7 +37,7 @@
     "mcp",
     "ink"
   ],
-  "author": "",
+  "author": "mothieras",
   "license": "MIT",
   "packageManager": "pnpm@11.0.9",
   "devDependencies": {

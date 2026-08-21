@@ -1,8 +1,12 @@
 # coil-core
 
+[![CI](https://github.com/mothieras/coil-core/actions/workflows/ci.yml/badge.svg)](https://github.com/mothieras/coil-core/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 An embeddable, local-first coding agent engine — a small trusted core, real MCP, concurrent subagents, observable execution, session persistence, and reports. Ships with an Ink/React TUI; the engine itself has zero UI dependencies and can be embedded headlessly.
 
-> **Status:** `v0.1.0` — early public release. The engine is functionally complete; the public API surface is not yet frozen.
+> **Status:** `v0.1.0` — an embeddable engine with an Ink TUI and headless embedding examples.
+<!-- TODO: run `pnpm dev` and add a screenshot: ![coil-core TUI](docs/screenshot.png) -->
 
 ## Why
 
@@ -79,4 +83,4 @@ See `CONTRIBUTING.md` for structure conventions and `AGENTS.md` for the invarian
 
 ## License
 
-MIT © coil-core contributors
+MIT © mothieras

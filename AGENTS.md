@@ -8,7 +8,7 @@ rules here override general defaults when they conflict.
 coil-core is an embeddable, local-first coding agent engine: a small trusted core,
 real MCP, concurrent subagents, observable execution, session persistence, and reports.
 The engine lives under `src/core/` (zero UI dependencies); `src/tui/` is an Ink/React
-consumer; `examples/` shows headless embedding. This is a fresh `coil-core` repository.
+consumer; `examples/` shows headless embedding.
 
 ## Commands
 
