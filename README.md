@@ -5,9 +5,6 @@
 
 An embeddable, local-first coding agent engine — a small trusted core, real MCP, concurrent subagents, observable execution, session persistence, and reports. Ships with an Ink/React TUI; the engine itself has zero UI dependencies and can be embedded headlessly.
 
-> **Status:** `v0.1.0` — an embeddable engine with an Ink TUI and headless embedding examples.
-<!-- TODO: run `pnpm dev` and add a screenshot: ![coil-core TUI](docs/screenshot.png) -->
-
 ## Why
 
 Most coding agents are black boxes wired to a single cloud model. `coil-core` is the opposite: a small engine you can run locally, observe turn-by-turn, extend with your own tools or MCP servers, and embed inside your own CLI, TUI, or backend.
@@ -79,7 +76,7 @@ src/
 | `pnpm build`           | `tsc` → `dist/`           |
 | `pnpm lint`            | ESLint + Prettier check   |
 
-See `CONTRIBUTING.md` for structure conventions and `AGENTS.md` for the invariants agents must preserve.
+See `AGENTS.md` for the invariants agents must preserve.
 
 ## License
 
