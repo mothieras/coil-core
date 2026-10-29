@@ -1,2 +1,2 @@
-# Generated architecture diagrams (archify)
-docs/architecture/
+# Package manager lockfile (pnpm controls its formatting)
+pnpm-lock.yaml
