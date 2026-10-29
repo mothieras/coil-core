@@ -1,7 +1,7 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Message } from "@earendil-works/pi-ai";
 
 export function pushTaggedUserMessage(
-  messages: Anthropic.Messages.MessageParam[],
+  messages: Message[],
   tag: string,
   body: string,
   style: "block" | "inline" = "block",
@@ -9,5 +9,6 @@ export function pushTaggedUserMessage(
   messages.push({
     role: "user",
     content: style === "inline" ? `<${tag}>${body}</${tag}>` : `<${tag}>\n${body}\n</${tag}>`,
+    timestamp: Date.now(),
   });
 }

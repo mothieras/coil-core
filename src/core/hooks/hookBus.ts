@@ -1,4 +1,4 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Message, ToolCall, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 
 export type HookEvent =
   "LoopStart" | "PreLLMCall" | "PreToolUse" | "PostToolUse" | "ToolResultsReady" | "Stop";
@@ -7,16 +7,19 @@ export type EffectHookEvent = "LoopStart" | "PreLLMCall" | "PostToolUse" | "Tool
 
 export type ControlHookEvent = "PreToolUse" | "Stop";
 
-export type ToolResultReadyBlock =
-  Anthropic.Messages.ToolResultBlockParam | Anthropic.Messages.TextBlockParam;
+/** Tool results plus any user messages a hook wants appended after them. */
+export type ToolResultsReadyPayload = {
+  results: ToolResultMessage[];
+  followups: UserMessage[];
+};
 
 export type HookArgs = {
-  LoopStart: [messages: Anthropic.Messages.MessageParam[]];
-  PreLLMCall: [messages: Anthropic.Messages.MessageParam[]];
-  PreToolUse: [block: Anthropic.Messages.ToolUseBlock];
-  PostToolUse: [block: Anthropic.Messages.ToolUseBlock, output: string];
-  ToolResultsReady: [results: ToolResultReadyBlock[]];
-  Stop: [messages: Anthropic.Messages.MessageParam[]];
+  LoopStart: [messages: Message[]];
+  PreLLMCall: [messages: Message[]];
+  PreToolUse: [block: ToolCall];
+  PostToolUse: [block: ToolCall, output: string];
+  ToolResultsReady: [payload: ToolResultsReadyPayload];
+  Stop: [messages: Message[]];
 };
 
 export type EffectHookCallback<Event extends EffectHookEvent> = (...args: HookArgs[Event]) => void;

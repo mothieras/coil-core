@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Message, Tool } from "@earendil-works/pi-ai";
 import type { HookBus } from "../hooks/hookBus.js";
 import { DEFAULT_MAIN_AGENT_MAX_TURNS } from "../loop/options.js";
 import type { CheckPermissionFn } from "../permission/types.js";
-import type { Provider } from "../providers/index.js";
+import type { Provider } from "../providers/types.js";
 import type { ToolRuntime } from "../tools/runtime.js";
 
 export interface AgentConfig {
@@ -16,11 +16,11 @@ export interface AgentConfig {
   workspaceRoot?: string | undefined;
   allowedTools?: readonly string[] | undefined;
   toolRuntime: ToolRuntime;
-  /** LLM provider the loop calls. Optional; loop falls back to the default Anthropic provider. */
+  /** LLM provider the loop calls. Optional; the loop falls back to the default pi-ai provider. */
   provider?: Provider | undefined;
   hooks?: HookBus | undefined;
   checkPermission?: CheckPermissionFn | undefined;
-  messages?: Anthropic.Messages.MessageParam[] | undefined;
+  messages?: Message[] | undefined;
 }
 
 export type AgentForkOptions = Omit<AgentConfig, "toolRuntime">;
@@ -41,7 +41,7 @@ export class Agent {
   readonly checkPermission?: CheckPermissionFn | undefined;
 
   /** Mutated by AgentRuntime's underlying loop. */
-  readonly messages: Anthropic.Messages.MessageParam[];
+  readonly messages: Message[];
 
   constructor(opts: AgentConfig) {
     this.id = opts.id;
@@ -61,7 +61,7 @@ export class Agent {
     this.messages = opts.messages ?? [];
   }
 
-  getToolDefinitions(): Anthropic.Messages.Tool[] {
+  getToolDefinitions(): Tool[] {
     return this.toolRuntime.getToolDefinitions(this.allowedTools);
   }
 

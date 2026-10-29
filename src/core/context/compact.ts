@@ -1,7 +1,13 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type Anthropic from "@anthropic-ai/sdk";
-import { getClient, getModel } from "../config/index.js";
+import type {
+  ImageContent,
+  Message,
+  TextContent,
+  ToolResultMessage,
+  Usage,
+} from "@earendil-works/pi-ai";
+import { textGenerator, type TextGenerator } from "../providers/index.js";
 import { transcriptStatePath } from "../state/paths.js";
 
 const KEEP_RECENT_TOOL_RESULTS = 8;
@@ -27,88 +33,62 @@ export type ContextSizeTracker = {
   coveredCount: number;
 };
 
-export function trackerFromUsage(
-  usage: Anthropic.Messages.Usage,
-  coveredCount: number,
-): ContextSizeTracker {
+export function trackerFromUsage(usage: Usage, coveredCount: number): ContextSizeTracker {
   return {
-    baseTokens:
-      usage.input_tokens +
-      usage.output_tokens +
-      (usage.cache_creation_input_tokens ?? 0) +
-      (usage.cache_read_input_tokens ?? 0),
+    baseTokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
     coveredCount,
   };
 }
 
-export function contextTokens(
-  messages: Anthropic.Messages.MessageParam[],
-  tracker?: ContextSizeTracker,
-): number {
+export function contextTokens(messages: Message[], tracker?: ContextSizeTracker): number {
   if (tracker && tracker.coveredCount <= messages.length) {
     return tracker.baseTokens + estimateTokens(messages.slice(tracker.coveredCount));
   }
   return estimateTokens(messages);
 }
 
-function buildToolNameMap(messages: Anthropic.Messages.MessageParam[]): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const msg of messages) {
-    if (msg.role !== "assistant") continue;
-    if (!Array.isArray(msg.content)) continue;
-    for (const block of msg.content) {
-      if (block.type === "tool_use") {
-        map.set(block.id, block.name);
-      }
-    }
-  }
-  return map;
-}
-
-export function microCompact(
-  messages: Anthropic.Messages.MessageParam[],
-  tracker?: ContextSizeTracker,
-): boolean {
+export function microCompact(messages: Message[], tracker?: ContextSizeTracker): boolean {
   if (contextTokens(messages, tracker) <= MICRO_COMPACT_THRESHOLD) return false;
 
-  const nameMap = buildToolNameMap(messages);
-
-  const located: Anthropic.Messages.ToolResultBlockParam[] = [];
-  for (const msg of messages) {
-    if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
-    for (const block of msg.content) {
-      if (block.type === "tool_result") located.push(block);
-    }
-  }
+  const located = messages.filter(
+    (message): message is ToolResultMessage => message.role === "toolResult",
+  );
   if (located.length <= KEEP_RECENT_TOOL_RESULTS) return false;
 
   let clearedAny = false;
   const toClear = located.slice(0, located.length - KEEP_RECENT_TOOL_RESULTS);
-  for (const block of toClear) {
-    if (typeof block.content !== "string") continue;
-    if (block.content.length <= 100) continue;
+  for (const message of toClear) {
+    if (PRESERVE_RESULT_TOOLS.has(message.toolName)) continue;
+    const text = textOf(message.content);
+    if (text.length <= 100) continue;
 
-    const toolName = nameMap.get(block.tool_use_id) ?? "unknown";
-    if (PRESERVE_RESULT_TOOLS.has(toolName)) continue;
-
-    block.content = [
-      "[Previous tool result compacted]",
-      `tool: ${toolName}`,
-      `original_chars: ${block.content.length}`,
-    ].join("\n");
+    message.content = [
+      {
+        type: "text",
+        text: [
+          "[Previous tool result compacted]",
+          `tool: ${message.toolName}`,
+          `original_chars: ${text.length}`,
+        ].join("\n"),
+      },
+    ];
     clearedAny = true;
   }
   return clearedAny;
 }
 
-function estimateTokens(messages: Anthropic.Messages.MessageParam[]): number {
+function textOf(content: (TextContent | ImageContent)[]): string {
+  return content
+    .filter((block): block is TextContent => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
+function estimateTokens(messages: Message[]): number {
   return Math.ceil(JSON.stringify(messages).length / 4);
 }
 
-async function saveTranscript(
-  messages: Anthropic.Messages.MessageParam[],
-  workspaceRoot: string,
-): Promise<string> {
+async function saveTranscript(messages: Message[], workspaceRoot: string): Promise<string> {
   const dir = transcriptStatePath(workspaceRoot);
   await mkdir(dir, { recursive: true });
 
@@ -130,53 +110,60 @@ function fenced(label: string, value: unknown, maxChars = TOOL_RESULT_CHAR_LIMIT
   return `\n\`\`\`${label}\n${truncateText(text, maxChars)}\n\`\`\`\n`;
 }
 
-function messageToMarkdown(msg: Anthropic.Messages.MessageParam, index: number): string {
-  const header = `## Message ${index + 1}: ${msg.role}`;
-  if (typeof msg.content === "string") {
-    return `${header}\n\n${msg.content}`;
+function messageToMarkdown(message: Message, index: number): string {
+  const header = `## Message ${index + 1}: ${message.role}`;
+
+  if (message.role === "user") {
+    if (typeof message.content === "string") {
+      return `${header}\n\n${message.content}`;
+    }
+    return `${header}\n\n${message.content
+      .map((block, blockIndex) =>
+        block.type === "text"
+          ? `### Text ${blockIndex + 1}\n\n${block.text}`
+          : `### Image ${blockIndex + 1}: ${block.mimeType}`,
+      )
+      .join("\n")}`;
   }
 
-  const sections = msg.content.map((block, blockIndex) => {
-    if (block.type === "text") {
-      return `### Text ${blockIndex + 1}\n\n${block.text}`;
-    }
+  if (message.role === "system") {
+    const text =
+      typeof message.content === "string"
+        ? message.content
+        : message.content.map((block) => block.text).join("\n");
+    return `${header}\n\n${text}`;
+  }
 
-    if (block.type === "tool_use") {
+  if (message.role === "assistant") {
+    const sections = message.content.map((block, blockIndex) => {
+      if (block.type === "text") {
+        return `### Text ${blockIndex + 1}\n\n${block.text}`;
+      }
+      if (block.type === "thinking") {
+        return `### Thinking ${blockIndex + 1}\n\n${block.thinking}`;
+      }
       return [
-        `### Tool Use ${blockIndex + 1}`,
+        `### Tool Call ${blockIndex + 1}`,
         `- id: ${block.id}`,
         `- name: ${block.name}`,
-        `- input:${fenced("json", block.input)}`,
+        `- input:${fenced("json", block.arguments)}`,
       ].join("\n");
-    }
+    });
+    return `${header}\n\n${sections.join("\n")}`;
+  }
 
-    if (block.type === "tool_result") {
-      return [
-        `### Tool Result ${blockIndex + 1}`,
-        `- tool_use_id: ${block.tool_use_id}`,
-        `- content:${fenced("text", block.content)}`,
-      ].join("\n");
-    }
-
-    return `### Block ${blockIndex + 1}: ${block.type}${fenced("json", block)}`;
-  });
-
-  return `${header}\n\n${sections.join("\n")}`;
+  return [
+    header,
+    `### Tool Result`,
+    `- tool_call_id: ${message.toolCallId}`,
+    `- tool: ${message.toolName}`,
+    `- is_error: ${message.isError}`,
+    `- content:${fenced("text", textOf(message.content))}`,
+  ].join("\n");
 }
 
-function hasToolResult(msg: Anthropic.Messages.MessageParam): boolean {
-  return (
-    msg.role === "user" &&
-    Array.isArray(msg.content) &&
-    msg.content.some((block) => block.type === "tool_result")
-  );
-}
-
-function recentMessagesForSummary(
-  messages: Anthropic.Messages.MessageParam[],
-  maxChars: number,
-): Anthropic.Messages.MessageParam[] {
-  const selected: Anthropic.Messages.MessageParam[] = [];
+function recentMessagesForSummary(messages: Message[], maxChars: number): Message[] {
+  const selected: Message[] = [];
   let total = 0;
 
   for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -191,7 +178,7 @@ function recentMessagesForSummary(
     if (total >= maxChars) break;
   }
 
-  while (selected.length > 1 && hasToolResult(selected[0]!)) {
+  while (selected.length > 1 && selected[0]?.role === "toolResult") {
     selected.shift();
   }
 
@@ -199,11 +186,11 @@ function recentMessagesForSummary(
 }
 
 export function splitMessagesForAutoCompact(
-  messages: Anthropic.Messages.MessageParam[],
+  messages: Message[],
   recentRawCharLimit: number,
 ): {
-  oldMessages: Anthropic.Messages.MessageParam[];
-  recentMessages: Anthropic.Messages.MessageParam[];
+  oldMessages: Message[];
+  recentMessages: Message[];
 } {
   let start = messages.length;
   let total = 0;
@@ -222,7 +209,7 @@ export function splitMessagesForAutoCompact(
     if (total >= recentRawCharLimit) break;
   }
 
-  while (start > 0 && hasToolResult(messages[start]!)) {
+  while (start > 0 && messages[start]?.role === "toolResult") {
     start -= 1;
   }
 
@@ -232,7 +219,7 @@ export function splitMessagesForAutoCompact(
   };
 }
 
-function formatMessagesForSummary(messages: Anthropic.Messages.MessageParam[]): string {
+function formatMessagesForSummary(messages: Message[]): string {
   const recentMessages = recentMessagesForSummary(messages, SUMMARY_INPUT_CHAR_LIMIT);
 
   return [
@@ -245,40 +232,33 @@ function formatMessagesForSummary(messages: Anthropic.Messages.MessageParam[]): 
   ].join("\n");
 }
 
-async function summarizeConversation(summaryInput: string): Promise<string> {
-  const response = await getClient().messages.create({
-    model: getModel() as Anthropic.Model,
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: [
-              "Summarize this conversation for continuity.",
-              "Include:",
-              "1. What was accomplished.",
-              "2. Current state.",
-              "3. Key decisions and constraints.",
-              "4. Open tasks and exact next steps.",
-              "Be concise, but preserve critical implementation details.",
-              "",
-              summaryInput,
-            ].join("\n"),
-          },
-        ],
-      },
-    ],
-    max_tokens: 2000,
-  });
+async function summarizeConversation(
+  summaryInput: string,
+  generate: TextGenerator,
+): Promise<string> {
+  const { text } = await generate(
+    [
+      "Summarize this conversation for continuity.",
+      "Include:",
+      "1. What was accomplished.",
+      "2. Current state.",
+      "3. Key decisions and constraints.",
+      "4. Open tasks and exact next steps.",
+      "Be concise, but preserve critical implementation details.",
+      "",
+      summaryInput,
+    ].join("\n"),
+    { maxTokens: 2000 },
+  );
 
-  return response.content.find((block) => block.type === "text")?.text ?? "No summary generated.";
+  return text === "" ? "No summary generated." : text;
 }
 
 async function compactMessagesWithResult(
-  messages: Anthropic.Messages.MessageParam[],
+  messages: Message[],
   reason: string,
   workspaceRoot = process.cwd(),
+  generate?: TextGenerator,
 ): Promise<ForceCompactResult> {
   const transcriptPath = await saveTranscript(messages, workspaceRoot);
   const { oldMessages, recentMessages } = splitMessagesForAutoCompact(
@@ -288,7 +268,7 @@ async function compactMessagesWithResult(
   const messagesToSummarize = oldMessages.length > 0 ? oldMessages : messages;
   const messagesToPreserve = oldMessages.length > 0 ? recentMessages : [];
   const summaryInput = formatMessagesForSummary(messagesToSummarize);
-  const summary = await summarizeConversation(summaryInput);
+  const summary = await summarizeConversation(summaryInput, generate ?? textGenerator());
 
   messages.splice(
     0,
@@ -296,22 +276,18 @@ async function compactMessagesWithResult(
     {
       role: "user",
       content: [
-        {
-          type: "text",
-          text: [
-            "[Conversation compressed]",
-            "",
-            "Older conversation history was compacted to preserve context window space.",
-            `Reason: ${reason}`,
-            `Full transcript: ${transcriptPath}`,
-            `Recent raw messages preserved after this summary: ${messagesToPreserve.length}`,
-            "",
-            "Continue from this compressed state:",
-            "",
-            summary,
-          ].join("\n"),
-        },
-      ],
+        "[Conversation compressed]",
+        "",
+        "Older conversation history was compacted to preserve context window space.",
+        `Reason: ${reason}`,
+        `Full transcript: ${transcriptPath}`,
+        `Recent raw messages preserved after this summary: ${messagesToPreserve.length}`,
+        "",
+        "Continue from this compressed state:",
+        "",
+        summary,
+      ].join("\n"),
+      timestamp: Date.now(),
     },
     ...messagesToPreserve,
   );
@@ -320,39 +296,43 @@ async function compactMessagesWithResult(
 }
 
 async function compactMessages(
-  messages: Anthropic.Messages.MessageParam[],
+  messages: Message[],
   reason: string,
   workspaceRoot = process.cwd(),
+  generate?: TextGenerator,
 ): Promise<boolean> {
-  return (await compactMessagesWithResult(messages, reason, workspaceRoot)).compacted;
+  return (await compactMessagesWithResult(messages, reason, workspaceRoot, generate)).compacted;
 }
 
 export async function autoCompactIfNeeded(
-  messages: Anthropic.Messages.MessageParam[],
+  messages: Message[],
   workspaceRoot?: string,
   tracker?: ContextSizeTracker,
+  generate?: TextGenerator,
 ): Promise<boolean> {
   if (contextTokens(messages, tracker) <= AUTO_COMPACT_THRESHOLD) return false;
 
-  return compactMessages(messages, "automatic token threshold", workspaceRoot);
+  return compactMessages(messages, "automatic token threshold", workspaceRoot, generate);
 }
 
 export async function forceCompact(
-  messages: Anthropic.Messages.MessageParam[],
+  messages: Message[],
   workspaceRoot?: string,
   reason = "manual slash command",
+  generate?: TextGenerator,
 ): Promise<boolean> {
   if (messages.length === 0) return false;
 
-  return compactMessages(messages, reason, workspaceRoot);
+  return compactMessages(messages, reason, workspaceRoot, generate);
 }
 
 export async function forceCompactWithResult(
-  messages: Anthropic.Messages.MessageParam[],
+  messages: Message[],
   workspaceRoot?: string,
   reason = "manual slash command",
+  generate?: TextGenerator,
 ): Promise<ForceCompactResult> {
   if (messages.length === 0) return { compacted: false };
 
-  return compactMessagesWithResult(messages, reason, workspaceRoot);
+  return compactMessagesWithResult(messages, reason, workspaceRoot, generate);
 }
