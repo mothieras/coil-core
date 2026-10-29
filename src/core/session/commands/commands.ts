@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { getClient, getModel } from "../../config/index.js";
+import { getModel } from "../../config/index.js";
+import { createDefaultProvider, textGenerator } from "../../providers/index.js";
 import type { Agent } from "../../agent/agent.js";
 import {
   createRuntimeLifecycleEvent,
@@ -153,6 +154,7 @@ export class SessionCommands {
         this.leadAgent.messages,
         this.workspaceRoot,
         reason,
+        textGenerator(this.leadAgent.provider),
       );
       const compacted = compactResult.compacted;
       this.emit(
@@ -202,15 +204,17 @@ export class SessionCommands {
   async ping(): Promise<SessionCommandResult> {
     try {
       const start = Date.now();
-      const response = await getClient().messages.create({
-        model: getModel()!,
-        max_tokens: 1,
-        messages: [{ role: "user", content: "ping" }],
-      });
+      const provider = this.leadAgent.provider ?? createDefaultProvider();
+      const message = await provider.generate(
+        provider.model,
+        {
+          messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
+          tools: [],
+        },
+        { maxTokens: 1 },
+      );
       const elapsed = Date.now() - start;
-      const usage = response.usage
-        ? `in=${response.usage.input_tokens ?? 0} out=${response.usage.output_tokens ?? 0}`
-        : "no usage";
+      const usage = `in=${message.usage.input} out=${message.usage.output}`;
       return {
         action: "notice",
         title: "Ping OK",

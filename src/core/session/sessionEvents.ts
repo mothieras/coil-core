@@ -1,4 +1,4 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Message, ToolResultMessage } from "@earendil-works/pi-ai";
 import {
   summarizeLifecycleText,
   summarizeLifecycleValue,
@@ -224,7 +224,7 @@ export function reportWrittenEvent(
 
 export function leadAgentStateSavedEvent(
   sessionId: string,
-  leadMessages: readonly Anthropic.Messages.MessageParam[],
+  leadMessages: readonly Message[],
   updatedAt: string,
 ): LeadAgentStateSavedEvent {
   return createSessionEvent<LeadAgentStateSavedEvent>({
@@ -239,16 +239,20 @@ export function leadAgentStateSavedEvent(
   });
 }
 
-function summarizeLeadAgentMessage(
-  message: Anthropic.Messages.MessageParam,
-): LeadAgentMessageProjection {
+function summarizeLeadAgentMessage(message: Message): LeadAgentMessageProjection {
+  if (message.role === "toolResult") {
+    return {
+      role: message.role,
+      contentSummary: summarizeToolResultMessage(message),
+    };
+  }
   return {
     role: message.role,
     contentSummary: summarizeLeadAgentContent(message.content),
   };
 }
 
-function summarizeLeadAgentContent(content: Anthropic.Messages.MessageParam["content"]): string {
+function summarizeLeadAgentContent(content: Message["content"]): string {
   if (typeof content === "string") return summarizeLifecycleText(content);
   return summarizeLifecycleValue(content.map(summarizeLeadAgentContentBlock));
 }
@@ -258,37 +262,33 @@ function summarizeLeadAgentContentBlock(block: unknown): unknown {
     return summarizeLifecycleValue(block);
   }
   const record = block as Record<string, unknown>;
-  if (record.type === "tool_use") return summarizeToolUseBlock(record);
-  if (record.type === "tool_result") return summarizeToolResultBlock(record);
+  if (record.type === "toolCall") {
+    const toolName = typeof record.name === "string" ? record.name : "unknown";
+    return {
+      type: "toolCall",
+      name: toolName,
+      inputSummary: summarizeToolInput(toolName, record.arguments),
+    };
+  }
+  if (record.type === "thinking") {
+    return {
+      type: "thinking",
+      thinkingSummary: summarizeLifecycleText(String(record.thinking ?? "")),
+    };
+  }
   return summarizeLifecycleValue(block);
 }
 
-function summarizeToolUseBlock(record: Record<string, unknown>): Record<string, unknown> {
-  const toolName = typeof record.name === "string" ? record.name : "unknown";
-  return {
-    type: "tool_use",
-    name: toolName,
-    inputSummary: summarizeToolInput(toolName, record.input),
-  };
-}
-
-function summarizeToolResultBlock(record: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = {
-    type: "tool_result",
-    resultSummary: summarizeToolResult(stringifyToolResultContent(record.content)),
-  };
-  if (typeof record.tool_use_id === "string") {
-    result.tool_use_id = record.tool_use_id;
-  }
-  if (typeof record.is_error === "boolean") result.is_error = record.is_error;
-  return result;
-}
-
-function stringifyToolResultContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  try {
-    return JSON.stringify(content);
-  } catch {
-    return String(content);
-  }
+function summarizeToolResultMessage(message: ToolResultMessage): string {
+  const text = message.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  return summarizeLifecycleValue({
+    type: "toolResult",
+    toolCallId: message.toolCallId,
+    toolName: message.toolName,
+    isError: message.isError,
+    resultSummary: summarizeToolResult(text),
+  });
 }

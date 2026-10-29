@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Message } from "@earendil-works/pi-ai";
 import { sessionPath, sessionStatePath } from "../../state/paths.js";
 import type {
   ConversationMessage,
@@ -9,6 +9,7 @@ import type {
   SessionSnapshot,
 } from "../types.js";
 import { createEmptySessionSnapshot } from "../projection/projection.js";
+import { importLegacyAnthropicMessages } from "./legacyMessages.js";
 
 export type SessionListItem = {
   id: string;
@@ -42,10 +43,7 @@ export class SessionStore {
     await this.writeJson(this.conversationPath(sessionId), messages);
   }
 
-  async saveLeadMessages(
-    sessionId: string,
-    messages: readonly Anthropic.Messages.MessageParam[],
-  ): Promise<void> {
+  async saveLeadMessages(sessionId: string, messages: readonly Message[]): Promise<void> {
     await this.ensureSessionDir(sessionId);
     await this.writeJson(this.leadMessagesPath(sessionId), messages);
   }
@@ -93,9 +91,9 @@ export class SessionStore {
     return items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  async loadLeadAgentMessages(sessionId: string): Promise<Anthropic.Messages.MessageParam[]> {
+  async loadLeadAgentMessages(sessionId: string): Promise<Message[]> {
     const data = await fs.readFile(this.leadMessagesPath(sessionId), "utf8");
-    return JSON.parse(data) as Anthropic.Messages.MessageParam[];
+    return importLegacyAnthropicMessages(JSON.parse(data));
   }
 
   async loadSnapshot(sessionId: string): Promise<SessionSnapshot> {

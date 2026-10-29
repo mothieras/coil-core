@@ -54,7 +54,7 @@ export class SessionRunner {
       source: "user_input",
     });
     this.store.record(conversationMessageEvent(userMessage));
-    this.leadAgent.messages.push({ role: "user", content: text });
+    this.leadAgent.messages.push({ role: "user", content: text, timestamp: Date.now() });
 
     const run = createAgentRun({
       sessionId: this.sessionId,
