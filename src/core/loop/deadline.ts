@@ -22,13 +22,12 @@ export function isDeadlineError(error: unknown, deadlineAt: number | undefined):
   return remaining !== undefined && remaining <= 0;
 }
 
-export function anthropicRequestTimeoutOptions(
-  deadlineAt: number | undefined,
-): { timeout: number } | undefined {
+/** Milliseconds left before the deadline; throws once it has passed. */
+export function remainingMs(deadlineAt: number | undefined): number | undefined {
   const remaining = msUntilDeadline(deadlineAt);
   if (remaining === undefined) return undefined;
   if (remaining <= 0) throw new AgentLoopTimeoutError();
-  return { timeout: remaining };
+  return remaining;
 }
 
 export async function awaitWithDeadline<T>(

@@ -1,15 +1,28 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Api, AssistantMessage, Message, Model, Tool } from "@earendil-works/pi-ai";
+
+/** Request payload the loop hands to a provider. */
+export type ProviderRequest = {
+  system?: string | undefined;
+  messages: Message[];
+  tools: Tool[];
+};
+
+export type ProviderCallOptions = {
+  maxTokens?: number | undefined;
+  timeoutMs?: number | undefined;
+};
 
 /**
- * LLM provider interface. A provider owns the model identity and the
- * messages endpoint used by the agent loop. Embedders can implement this to
- * route the loop to a non-Anthropic backend without touching the loop itself.
+ * LLM provider interface. The loop only calls `generate`; `model` describes the
+ * default target and `fallbackModel` the recovery target. `generate` takes the
+ * model explicitly so recovery can switch models mid-run.
  */
 export interface Provider {
-  /** Model id passed in `model` on every request. */
-  readonly model: string;
-  /** Optional fallback model used by recovery when the primary is unavailable. */
-  readonly fallbackModel?: string | undefined;
-  /** Anthropic-shaped messages endpoint. `create` is the only call the loop makes. */
-  readonly messages: Pick<Anthropic.Messages, "create">;
+  readonly model: Model<Api>;
+  readonly fallbackModel?: Model<Api> | undefined;
+  generate(
+    model: Model<Api>,
+    request: ProviderRequest,
+    options?: ProviderCallOptions,
+  ): Promise<AssistantMessage>;
 }

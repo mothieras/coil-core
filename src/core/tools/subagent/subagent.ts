@@ -48,6 +48,6 @@ export function forkSubAgent(
     allowedTools,
     system: buildSubAgentSystemPrompt(parent.workspaceRoot, options),
     checkPermission: options?.checkPermission,
-    messages: [{ role: "user", content: prompt }],
+    messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
   });
 }

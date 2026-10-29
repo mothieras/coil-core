@@ -10,7 +10,7 @@ import { builtinTool, ToolRegistry, type ToolDefinition } from "../src/core/inde
 const echoDefinition: ToolDefinition = {
   name: "echo",
   description: "Echoes back the provided text.",
-  input_schema: {
+  parameters: {
     type: "object",
     properties: {
       text: { type: "string", description: "Text to echo back." },

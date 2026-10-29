@@ -13,7 +13,7 @@ export function createSubagentTool(deps: {
       name: "subagent",
       description:
         "Spawn an async subagent and return a sub_id immediately. Results arrive automatically as <subagent-results> messages — keep working, or end your turn and the host will re-wake you when results land. Defaults to 90 turns and 30 minutes.",
-      input_schema: {
+      parameters: {
         type: "object",
         properties: {
           prompt: { type: "string", description: "The task for the subagent to complete." },

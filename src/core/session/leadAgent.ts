@@ -1,15 +1,17 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Message } from "@earendil-works/pi-ai";
 import { Agent } from "../agent/agent.js";
 import type { AppContext } from "../app/context.js";
 import { buildSystemPrompt, type PromptContext } from "../context/assembler.js";
 import type { CheckPermissionFn } from "../permission/types.js";
+import type { Provider } from "../providers/index.js";
 
 export function createLeadAgent(options: {
   workspaceRoot: string;
   app: AppContext;
   leadAgent?: Agent | undefined;
   checkPermission?: CheckPermissionFn | undefined;
-  messages?: Anthropic.Messages.MessageParam[] | undefined;
+  provider?: Provider | undefined;
+  messages?: Message[] | undefined;
 }): Agent {
   if (options.leadAgent) {
     return bindLeadAgentToApp(
@@ -17,6 +19,7 @@ export function createLeadAgent(options: {
       options.app,
       options.messages,
       options.checkPermission,
+      options.provider,
     );
   }
   return new Agent({
@@ -26,6 +29,7 @@ export function createLeadAgent(options: {
     toolRuntime: options.app.toolRuntime,
     hooks: options.app.hooks,
     checkPermission: options.checkPermission,
+    provider: options.provider,
     messages: options.messages,
   });
 }
@@ -33,8 +37,9 @@ export function createLeadAgent(options: {
 export function bindLeadAgentToApp(
   agent: Agent,
   app: AppContext,
-  messages?: Anthropic.Messages.MessageParam[] | undefined,
+  messages?: Message[] | undefined,
   checkPermission?: CheckPermissionFn | undefined,
+  provider?: Provider | undefined,
 ): Agent {
   return new Agent({
     id: agent.id,
@@ -48,6 +53,7 @@ export function bindLeadAgentToApp(
     toolRuntime: app.toolRuntime,
     hooks: app.hooks,
     checkPermission: checkPermission ?? agent.checkPermission,
+    provider: provider ?? agent.provider,
     messages: messages ?? agent.messages,
   });
 }

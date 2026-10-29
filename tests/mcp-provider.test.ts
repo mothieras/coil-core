@@ -47,7 +47,7 @@ test("MCP provider converts listed tools into namespaced RegisteredTool entries"
   assert.equal(result.tools[0]?.name, "mcp__github__search_issues");
   assert.equal(result.tools[0]?.definition.name, "mcp__github__search_issues");
   assert.equal(result.tools[0]?.definition.description, "Search GitHub issues.");
-  assert.deepEqual(result.tools[0]?.definition.input_schema, {
+  assert.deepEqual(result.tools[0]?.definition.parameters, {
     type: "object",
     properties: {
       query: { type: "string" },

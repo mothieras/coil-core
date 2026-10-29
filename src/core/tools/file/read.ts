@@ -30,7 +30,7 @@ export function createReadFileTool(deps: { workspaceRoot: string }): RegisteredT
     {
       name: "read_file",
       description: "Read file contents.",
-      input_schema: {
+      parameters: {
         type: "object",
         properties: {
           path: { type: "string" },

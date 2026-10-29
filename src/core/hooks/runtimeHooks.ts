@@ -1,8 +1,8 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Message, ToolCall } from "@earendil-works/pi-ai";
 import type { AppContext } from "../app/context.js";
 import { pushTaggedUserMessage } from "./messageInjection.js";
 import { currentAgent } from "../agent/agent.js";
-import type { ToolResultReadyBlock } from "./hookBus.js";
+import type { ToolResultsReadyPayload } from "./hookBus.js";
 
 type TaskLoopState = {
   roundsSinceTaskUpdate: number;
@@ -41,8 +41,8 @@ export function registerRuntimeHooks(app: AppContext): void {
     markTaskToolUse(taskState(), block);
   });
 
-  app.hooks.register("ToolResultsReady", (results) => {
-    appendTaskReminder(app, taskState(), results);
+  app.hooks.register("ToolResultsReady", (payload) => {
+    appendTaskReminder(app, taskState(), payload);
   });
 }
 
@@ -55,11 +55,7 @@ function getTaskState(states: Map<string, TaskLoopState>, name: string): TaskLoo
   return state;
 }
 
-function injectTaskStatus(
-  app: AppContext,
-  state: TaskLoopState,
-  messages: Anthropic.Messages.MessageParam[],
-): void {
+function injectTaskStatus(app: AppContext, state: TaskLoopState, messages: Message[]): void {
   if (!state.showTaskStatus) return;
   const taskSummary = app.toolRuntime.taskSummary();
   if (taskSummary) {
@@ -68,10 +64,7 @@ function injectTaskStatus(
   state.showTaskStatus = false;
 }
 
-function injectAsyncWorkResults(
-  app: AppContext,
-  messages: Anthropic.Messages.MessageParam[],
-): void {
+function injectAsyncWorkResults(app: AppContext, messages: Message[]): void {
   if (agentName() !== "lead") return;
   const drained = app.inbox.drainNotifications();
   if (drained.length === 0) return;
@@ -92,7 +85,7 @@ function injectAsyncWorkResults(
   }
 }
 
-function markTaskToolUse(state: TaskLoopState, block: Anthropic.Messages.ToolUseBlock): void {
+function markTaskToolUse(state: TaskLoopState, block: ToolCall): void {
   if (block.name !== "update_tasks") return;
   state.sawTaskTool = true;
   state.sawTaskToolThisTurn = true;
@@ -102,12 +95,13 @@ function markTaskToolUse(state: TaskLoopState, block: Anthropic.Messages.ToolUse
 function appendTaskReminder(
   app: AppContext,
   state: TaskLoopState,
-  results: ToolResultReadyBlock[],
+  payload: ToolResultsReadyPayload,
 ): void {
   if (!shouldRemindTaskUpdate(app, state)) return;
-  results.push({
-    type: "text",
-    text: "<reminder>Update your tasks with update_tasks.</reminder>",
+  payload.followups.push({
+    role: "user",
+    content: "<reminder>Update your tasks with update_tasks.</reminder>",
+    timestamp: Date.now(),
   });
 }
 

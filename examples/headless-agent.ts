@@ -8,7 +8,7 @@
  *   pnpm build
  *   tsx examples/headless-agent.ts "explain this repo's entry point"
  */
-import { Agent, agentLoop, createAnthropicProvider, createAppContext } from "../src/core/index.js";
+import { Agent, agentLoop, createDefaultProvider, createAppContext } from "../src/core/index.js";
 
 async function main(): Promise<void> {
   const prompt = process.argv[2];
@@ -23,9 +23,9 @@ async function main(): Promise<void> {
     system: "You are a concise coding agent. Use tools when useful, then answer.",
     workspaceRoot: process.cwd(),
     toolRuntime: app.toolRuntime,
-    provider: createAnthropicProvider(),
+    provider: createDefaultProvider(),
     hooks: app.hooks,
-    messages: [{ role: "user", content: prompt }],
+    messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
   });
 
   try {

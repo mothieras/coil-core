@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type Anthropic from "@anthropic-ai/sdk";
 import { Agent } from "../src/core/agent/agent.js";
 import type { AgentConfig } from "../src/core/agent/agent.js";
 import { ToolRegistry } from "../src/core/tools/registry.js";
@@ -13,12 +12,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CheckPermissionFn } from "../src/core/permission/types.js";
 import type { RegisteredTool, ToolDefinition } from "../src/core/tools/types.js";
+import { userMessage } from "./helpers/pi.js";
 
 function definition(name: string): ToolDefinition {
   return {
     name,
     description: `${name} description`,
-    input_schema: { type: "object", properties: {} },
+    parameters: { type: "object", properties: {} },
   };
 }
 
@@ -72,7 +72,7 @@ test("Agent constructs with all optional fields", async () => {
     const runtime = new ToolRuntime({ registry, taskManager, backgroundManager: bg });
     const hooks = new HookBus();
     const checkPermission: CheckPermissionFn = async () => ({ allowed: true });
-    const messages = [{ role: "user" as const, content: "hello" }];
+    const messages = [userMessage("hello")];
 
     const agent = new Agent({
       name: "reviewer",
@@ -159,9 +159,9 @@ test("Agent.messages is mutable (loop writes to it)", async () => {
     const runtime = new ToolRuntime({ registry, taskManager, backgroundManager: bg });
 
     const agent = new Agent({ toolRuntime: runtime });
-    assert.deepEqual(agent.messages, []);
+    assert.equal(agent.messages.length, 0);
 
-    (agent.messages as Anthropic.Messages.MessageParam[]).push({ role: "user", content: "hi" });
+    agent.messages.push(userMessage("hi"));
     assert.equal(agent.messages.length, 1);
   } finally {
     await rm(tmp, { recursive: true, force: true });
@@ -215,21 +215,23 @@ test("Agent.fork shares toolRuntime, inherits config, isolates the conversation"
     const hooks = new HookBus();
     const checkPermission: CheckPermissionFn = async () => ({ allowed: true });
 
+    const parentMessages = [userMessage("parent turn")];
     const parent = new Agent({
       toolRuntime: runtime,
       hooks,
       checkPermission,
       workspaceRoot: "/tmp/ws",
       system: "parent system",
-      messages: [{ role: "user", content: "parent turn" }],
+      messages: parentMessages,
     });
 
+    const childMessages = [userMessage("child task")];
     const child = parent.fork({
       name: "child",
       maxTurns: 16,
       allowedTools: ["bash"],
       system: "child system",
-      messages: [{ role: "user", content: "child task" }],
+      messages: childMessages,
     });
 
     // shared — same reference
@@ -244,9 +246,9 @@ test("Agent.fork shares toolRuntime, inherits config, isolates the conversation"
     assert.equal(child.maxTurns, 16);
     assert.deepEqual(child.allowedTools, ["bash"]);
     assert.equal(child.system, "child system");
-    assert.deepEqual(child.messages, [{ role: "user", content: "child task" }]);
+    assert.deepEqual(child.messages, childMessages);
     // the parent's conversation is untouched by the child
-    assert.deepEqual(parent.messages, [{ role: "user", content: "parent turn" }]);
+    assert.deepEqual(parent.messages, parentMessages);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

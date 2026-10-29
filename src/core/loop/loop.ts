@@ -1,9 +1,16 @@
-import Anthropic from "@anthropic-ai/sdk";
 import crypto from "node:crypto";
+import type {
+  Api,
+  AssistantMessage,
+  Model,
+  ToolCall,
+  ToolResultMessage,
+  UserMessage,
+} from "@earendil-works/pi-ai";
 import {
-  anthropicRequestTimeoutOptions,
   awaitWithDeadline,
   isDeadlineError,
+  remainingMs,
   throwIfDeadlineExpired,
 } from "./deadline.js";
 import {
@@ -12,8 +19,9 @@ import {
   DEFAULT_SUB_AGENT_TIMEOUT_MS,
 } from "./options.js";
 import type { AgentLoopResult, AgentLoopStopReason } from "./options.js";
-import type { ToolResultReadyBlock } from "../hooks/hookBus.js";
-import { createAnthropicProvider } from "../providers/index.js";
+import type { ToolResultsReadyPayload } from "../hooks/hookBus.js";
+import { createDefaultProvider, textGenerator } from "../providers/index.js";
+import type { ProviderCallOptions } from "../providers/index.js";
 import {
   autoCompactIfNeeded,
   forceCompact,
@@ -59,8 +67,8 @@ export type AgentLoopOptions = {
   runContext?: RuntimeRunContext | undefined;
 };
 
-function stopContent(text: string): Anthropic.Messages.Message["content"] {
-  return [{ type: "text", text, citations: null }];
+function stopContent(text: string): AssistantMessage["content"] {
+  return [{ type: "text", text }];
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -76,11 +84,11 @@ function formatRuntimeError(error: unknown): string {
   return String(error);
 }
 
-function summarizeAssistantContent(content: Anthropic.Messages.Message["content"]): string {
+function summarizeAssistantContent(content: AssistantMessage["content"]): string {
   const parts = content.map((block) => {
     if (block.type === "text") return summarizeLifecycleText(block.text);
-    if (block.type === "tool_use") return `[tool_use:${block.name}]`;
-    return `[${block.type}]`;
+    if (block.type === "toolCall") return `[toolCall:${block.name}]`;
+    return "[thinking]";
   });
   return summarizeLifecycleText(parts.join("\n"));
 }
@@ -95,7 +103,7 @@ function getToolSource(agent: Agent, name: string): ToolSource | undefined {
 function emitAssistantMessageAdded(
   options: AgentLoopOptions,
   messageIndex: number,
-  response: Anthropic.Messages.Message,
+  response: AssistantMessage,
 ): void {
   if (!options.runContext) return;
   safeEmitRuntimeLifecycle(
@@ -106,22 +114,18 @@ function emitAssistantMessageAdded(
       messageIndex,
       contentSummary: summarizeAssistantContent(response.content),
       blockCount: response.content.length,
-      stopReason: response.stop_reason,
-      ...(response.usage
-        ? {
-            usage: {
-              inputTokens: response.usage.input_tokens ?? 0,
-              outputTokens: response.usage.output_tokens ?? 0,
-            },
-          }
-        : {}),
+      stopReason: response.stopReason,
+      usage: {
+        inputTokens: response.usage.input,
+        outputTokens: response.usage.output,
+      },
     }),
   );
 }
 
 function emitToolStarted(
   options: AgentLoopOptions,
-  block: Anthropic.Messages.ToolUseBlock,
+  block: ToolCall,
   source: ToolSource | undefined,
 ): void {
   if (!options.runContext) return;
@@ -133,14 +137,14 @@ function emitToolStarted(
       toolCallId: block.id,
       toolName: block.name,
       ...(source !== undefined ? { source } : {}),
-      inputSummary: summarizeToolInput(block.name, block.input),
+      inputSummary: summarizeToolInput(block.name, block.arguments),
     }),
   );
 }
 
 function emitToolFinished(
   options: AgentLoopOptions,
-  block: Anthropic.Messages.ToolUseBlock,
+  block: ToolCall,
   source: ToolSource | undefined,
   fields: Pick<ToolFinishedEvent, "status"> &
     Partial<Pick<ToolFinishedEvent, "resultSummary" | "error" | "durationMs">>,
@@ -163,25 +167,24 @@ function emitToolFinished(
 }
 
 type ToolUseExecutionResult =
-  | { kind: "result"; result: Anthropic.Messages.ToolResultBlockParam }
-  | { kind: "timeout"; result: AgentLoopResult };
+  { kind: "result"; result: ToolResultMessage } | { kind: "timeout"; result: AgentLoopResult };
 
 type ToolUseExecutionOptions = {
   agent: Agent;
-  block: Anthropic.Messages.ToolUseBlock;
+  block: ToolCall;
   deadlineAt: number | undefined;
   loopOptions: AgentLoopOptions;
   timedOut: () => AgentLoopResult;
 };
 
-function toolResult(
-  block: Anthropic.Messages.ToolUseBlock,
-  content: string,
-): Anthropic.Messages.ToolResultBlockParam {
+function toolResult(block: ToolCall, content: string, isError: boolean): ToolResultMessage {
   return {
-    type: "tool_result",
-    tool_use_id: block.id,
-    content,
+    role: "toolResult",
+    toolCallId: block.id,
+    toolName: block.name,
+    content: [{ type: "text", text: content }],
+    isError,
+    timestamp: Date.now(),
   };
 }
 
@@ -211,6 +214,16 @@ async function executeToolUseBlock(
   emitToolStarted(loopOptions, block, source);
 
   try {
+    const allowedTools = agent.allowedTools;
+    if (allowedTools !== undefined && !allowedTools.includes(block.name)) {
+      const notAllowed = `Error: Tool '${block.name}' is not allowed for this agent.`;
+      finish({
+        status: "blocked",
+        resultSummary: summarizeLifecycleText(notAllowed),
+      });
+      return { kind: "result", result: toolResult(block, notAllowed, true) };
+    }
+
     // Tool execution gating: PreToolUse hooks run first (can block entirely,
     // skipping permission), then the optional permission pipeline (deny list →
     // rule matching → user approval). A PreToolUse hook that blocks bypasses
@@ -221,13 +234,13 @@ async function executeToolUseBlock(
         status: "blocked",
         resultSummary: summarizeLifecycleText(blocked),
       });
-      return { kind: "result", result: toolResult(block, blocked) };
+      return { kind: "result", result: toolResult(block, blocked, true) };
     }
 
     if (checkPermission) {
       const permissionId = crypto.randomUUID();
-      const input = block.input as Record<string, unknown>;
-      const inputSummary = summarizeToolInput(block.name, block.input);
+      const input = block.arguments as Record<string, unknown>;
+      const inputSummary = summarizeToolInput(block.name, block.arguments);
       const runContext = loopOptions.runContext ?? {
         runId: "untracked",
         agentId: agent.id ?? "lead",
@@ -288,7 +301,7 @@ async function executeToolUseBlock(
           status: "permission_denied",
           resultSummary: summarizeLifecycleText(deniedResult),
         });
-        return { kind: "result", result: toolResult(block, deniedResult) };
+        return { kind: "result", result: toolResult(block, deniedResult, true) };
       }
     }
 
@@ -296,7 +309,7 @@ async function executeToolUseBlock(
     let invokeError: string | undefined;
     try {
       output = await awaitWithDeadline(
-        toolRuntime.invokeTool(block.name, block.input, {
+        toolRuntime.invokeTool(block.name, block.arguments, {
           toolCallId: block.id,
           toolName: block.name,
           ...(loopOptions.runContext !== undefined
@@ -318,13 +331,13 @@ async function executeToolUseBlock(
     }
 
     hooks?.emitEffect("PostToolUse", block, output);
-    const status = invokeError || isToolErrorOutput(output) ? "error" : "completed";
+    const isError = invokeError !== undefined || isToolErrorOutput(output);
     finish({
-      status,
+      status: isError ? "error" : "completed",
       resultSummary: summarizeToolResult(output),
-      ...(status === "error" ? { error: invokeError ?? summarizeLifecycleText(output) } : {}),
+      ...(isError ? { error: invokeError ?? summarizeLifecycleText(output) } : {}),
     });
-    return { kind: "result", result: toolResult(block, output) };
+    return { kind: "result", result: toolResult(block, output, isError) };
   } catch (error) {
     finish({
       status: "error",
@@ -340,7 +353,7 @@ async function executeToolUseBlock(
 function requireSuccessOutcome(
   outcome: LLMOutcome,
   actionType: string,
-): Anthropic.Messages.Message | { error: string } {
+): AssistantMessage | { error: string } {
   if (outcome.kind === "success") return outcome.response;
   return {
     error: `Internal recovery error: action '${actionType}' requires a successful model response.`,
@@ -359,9 +372,10 @@ export async function agentLoop(
 async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<AgentLoopResult> {
   const messages = agent.messages;
   const timeoutMs = agent.timeoutMs;
-  const provider = agent.provider ?? createAnthropicProvider();
+  const provider = agent.provider ?? createDefaultProvider();
   const deadlineAt = timeoutMs !== undefined ? Date.now() + timeoutMs : undefined;
   const workspaceRoot = agent.workspaceRoot;
+  const generateText = textGenerator(provider);
 
   const tools = agent.getToolDefinitions();
   const system = agent.system;
@@ -375,7 +389,7 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
   let turns = 0;
   let recoveryState = initialRecoveryState();
   let maxTokens = DEFAULT_MAX_TOKENS;
-  let activeModel = provider.model;
+  let activeModel: Model<Api> = provider.model;
   // Real context size from the last response's usage; undefined until the
   // first response lands and after any compaction rewrites the buffer.
   let usageTracker: ContextSizeTracker | undefined;
@@ -394,7 +408,7 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
 
       if (microCompact(messages, usageTracker)) usageTracker = undefined;
       const autoCompacted = await awaitWithDeadline(
-        autoCompactIfNeeded(messages, workspaceRoot, usageTracker),
+        autoCompactIfNeeded(messages, workspaceRoot, usageTracker, generateText),
         deadlineAt,
       );
       if (autoCompacted) usageTracker = undefined;
@@ -406,18 +420,11 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
       // ── LLM call — outcome capture for recovery decision ──
       let outcome: LLMOutcome;
       try {
+        const callOptions: ProviderCallOptions = { maxTokens };
+        const timeout = remainingMs(deadlineAt);
+        if (timeout !== undefined) callOptions.timeoutMs = timeout;
         const response = await awaitWithDeadline(
-          provider.messages.create(
-            {
-              model: activeModel as Anthropic.Model,
-              system: system,
-              tools: tools,
-              messages,
-              max_tokens: maxTokens,
-              stream: false,
-            },
-            anthropicRequestTimeoutOptions(deadlineAt),
-          ),
+          provider.generate(activeModel, { system, messages, tools }, callOptions),
           deadlineAt,
         );
         outcome = { kind: "success", response };
@@ -427,7 +434,11 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
       }
 
       const fallbackModel = provider.fallbackModel;
-      const action = decideRecovery(outcome, recoveryState, fallbackModel ? { fallbackModel } : {});
+      const action = decideRecovery(
+        outcome,
+        recoveryState,
+        fallbackModel !== undefined ? { fallbackModel } : {},
+      );
 
       switch (action.type) {
         case "none": {
@@ -443,7 +454,7 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
           break;
         }
         case "retry": {
-          maxTokens = action.maxTokens;
+          maxTokens = Math.min(action.maxTokens, activeModel.maxTokens);
           recoveryState = action.nextState;
           continue;
         }
@@ -455,17 +466,17 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
               content: stopContent(resp.error),
             };
           }
-          messages.push({ role: "assistant", content: resp.content });
+          messages.push(resp);
           usageTracker = trackerFromUsage(resp.usage, messages.length);
           emitAssistantMessageAdded(options, messages.length - 1, resp);
-          messages.push({ role: "user", content: CONTINUATION_PROMPT });
+          messages.push({ role: "user", content: CONTINUATION_PROMPT, timestamp: Date.now() });
           recoveryState = action.nextState;
           continue;
         }
         case "compact_and_retry": {
           try {
             await awaitWithDeadline(
-              forceCompact(messages, workspaceRoot, "context overflow recovery"),
+              forceCompact(messages, workspaceRoot, "context overflow recovery", generateText),
               deadlineAt,
             );
             usageTracker = undefined;
@@ -480,7 +491,7 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
           continue;
         }
         case "backoff_and_retry": {
-          if (action.nextModel) activeModel = action.nextModel;
+          if (action.nextModel !== undefined) activeModel = action.nextModel;
           await awaitWithDeadline(sleep(action.delayMs), deadlineAt);
           recoveryState = action.nextState;
           continue;
@@ -503,21 +514,27 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
       }
       turns += 1;
 
-      messages.push({ role: "assistant", content: response.content });
+      messages.push(response);
       usageTracker = trackerFromUsage(response.usage, messages.length);
       emitAssistantMessageAdded(options, messages.length - 1, response);
-      if (response.stop_reason !== "tool_use") {
+      if (response.stopReason === "pending" || response.stopReason === "deferred") {
+        return {
+          stopReason: "error",
+          content: stopContent(`Provider returned an incomplete response: ${response.stopReason}.`),
+        };
+      }
+      if (response.stopReason !== "toolUse") {
         const forceContinue = hooks?.triggerControl("Stop", messages);
         if (forceContinue) {
-          messages.push({ role: "user", content: forceContinue });
+          messages.push({ role: "user", content: forceContinue, timestamp: Date.now() });
           continue;
         }
-        return { stopReason: response.stop_reason, content: response.content };
+        return { stopReason: response.stopReason, content: response.content };
       }
 
-      const results: ToolResultReadyBlock[] = [];
+      const results: ToolResultMessage[] = [];
       for (const block of response.content) {
-        if (block.type !== "tool_use") continue;
+        if (block.type !== "toolCall") continue;
         throwIfDeadlineExpired(deadlineAt);
         const execution = await executeToolUseBlock({
           agent,
@@ -530,8 +547,10 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
         results.push(execution.result);
       }
 
-      hooks?.emitEffect("ToolResultsReady", results);
-      messages.push({ role: "user", content: results });
+      const followups: UserMessage[] = [];
+      const payload: ToolResultsReadyPayload = { results, followups };
+      hooks?.emitEffect("ToolResultsReady", payload);
+      messages.push(...payload.results, ...payload.followups);
     }
   } catch (error) {
     if (isDeadlineError(error, deadlineAt)) return timedOut();

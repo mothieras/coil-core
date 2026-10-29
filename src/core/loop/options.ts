@@ -1,11 +1,10 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import type { AssistantMessage, StopReason } from "@earendil-works/pi-ai";
 
-export type AgentLoopStopReason =
-  Anthropic.Messages.Message["stop_reason"] | "max_turns" | "timeout" | "error";
+export type AgentLoopStopReason = StopReason | "max_turns" | "timeout";
 
 export type AgentLoopResult = {
   stopReason: AgentLoopStopReason;
-  content: Anthropic.Messages.Message["content"];
+  content: AssistantMessage["content"];
 };
 
 export const DEFAULT_MAIN_AGENT_MAX_TURNS = 200;

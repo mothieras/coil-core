@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Message } from "@earendil-works/pi-ai";
 import type { AgentKind, AgentRunStatus, AgentRunTrigger } from "../agent/run.js";
 import type { RuntimeLifecycleEvent } from "../agent/lifecycle.js";
 import type { ToolSource } from "../tools/types.js";
@@ -28,12 +28,12 @@ export type ConversationMessage = {
 
 export type LeadAgentState = {
   sessionId: string;
-  messages: Anthropic.Messages.MessageParam[];
+  messages: Message[];
   updatedAt: string;
 };
 
 export type LeadAgentMessageProjection = {
-  role: Anthropic.Messages.MessageParam["role"];
+  role: Message["role"];
   contentSummary: string;
 };
 

@@ -3,9 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type Anthropic from "@anthropic-ai/sdk";
-import { getClient, getModel } from "../src/core/config/index.js";
-const client = getClient();
+import type { AssistantMessage, StopReason } from "@earendil-works/pi-ai";
 import {
   decideRecovery,
   extractRetryAfterMs,
@@ -16,21 +14,18 @@ import {
 import { agentLoop } from "../src/core/loop/loop.js";
 import { Agent } from "../src/core/agent/agent.js";
 import type { ToolDefinition } from "../src/core/tools/types.js";
+import {
+  assistantMessage,
+  fakeProvider,
+  testModel,
+  textMessage,
+  toolCall,
+  toolCallMessage,
+  userMessage,
+} from "./helpers/pi.js";
 
-function textResponse(
-  text: string,
-  stopReason: Anthropic.Messages.Message["stop_reason"],
-): Anthropic.Messages.Message {
-  return {
-    id: "msg_test",
-    type: "message",
-    role: "assistant",
-    model: "test-model",
-    content: [{ type: "text", text, citations: null }],
-    stop_reason: stopReason,
-    stop_sequence: null,
-    usage: { input_tokens: 1, output_tokens: 1 },
-  } as unknown as Anthropic.Messages.Message;
+function textResponse(text: string, stopReason: StopReason): AssistantMessage {
+  return textMessage(text, stopReason);
 }
 
 const emptyRuntime = {
@@ -42,7 +37,7 @@ function toolDefinition(name: string): ToolDefinition {
   return {
     name,
     description: `${name} test tool`,
-    input_schema: {
+    parameters: {
       type: "object",
       properties: {},
     },
@@ -152,6 +147,15 @@ test("decideRecovery retries transient network errors before aborting", () => {
   assert.equal(action.nextState.retryAttempt, 1);
 });
 
+test("decideRecovery retries pi-ai transport messages without an error code", () => {
+  const action = decideRecovery(
+    { kind: "error", error: new Error("fetch failed") },
+    initialRecoveryState(),
+  );
+
+  assert.equal(action.type, "backoff_and_retry");
+});
+
 test("decideRecovery aborts transient network errors after retry budget", () => {
   const action = decideRecovery(
     { kind: "error", error: { code: "ETIMEDOUT", message: "timeout" } },
@@ -163,62 +167,58 @@ test("decideRecovery aborts transient network errors after retry budget", () => 
 });
 
 test("decideRecovery switches model after three consecutive overloads", () => {
+  const fallback = testModel("fallback-model");
   const action = decideRecovery(
     { kind: "error", error: { status: 529, message: "overloaded" } },
     { ...initialRecoveryState(), consecutive529: 2 },
-    { fallbackModel: "fallback-model" },
+    { fallbackModel: fallback },
   );
 
   assert.equal(action.type, "backoff_and_retry");
-  assert.equal(action.nextModel, "fallback-model");
+  assert.equal(action.nextModel?.id, "fallback-model");
 });
 
 test("agentLoop resets max_tokens after successful recovery", async () => {
-  const originalCreate = client.messages.create;
   const requestedMaxTokens: number[] = [];
   const responses = [
-    textResponse("partial", "max_tokens"),
-    textResponse("done after retry", "end_turn"),
-    textResponse("fresh turn", "end_turn"),
+    textResponse("partial", "length"),
+    textResponse("done after retry", "stop"),
+    textResponse("fresh turn", "stop"),
   ];
   let stopHookCalls = 0;
 
-  client.messages.create = (async (params: Anthropic.Messages.MessageCreateParams) => {
-    requestedMaxTokens.push(params.max_tokens);
+  const provider = fakeProvider((_request, call) => {
+    requestedMaxTokens.push(call.options?.maxTokens ?? -1);
     const response = responses.shift();
     if (!response) throw new Error("unexpected extra model call");
     return response;
-  }) as typeof client.messages.create;
+  });
 
-  try {
-    const result = await agentLoop(
-      new Agent({
-        toolRuntime: emptyRuntime as never,
-        hooks: {
-          emitEffect() {},
-          triggerControl(event: string) {
-            if (event !== "Stop") return null;
-            stopHookCalls += 1;
-            return stopHookCalls === 1 ? "continue once" : null;
-          },
-        } as never,
-        messages: [{ role: "user", content: "hello" }],
-      }),
-    );
+  const result = await agentLoop(
+    new Agent({
+      toolRuntime: emptyRuntime as never,
+      provider,
+      hooks: {
+        emitEffect() {},
+        triggerControl(event: string) {
+          if (event !== "Stop") return null;
+          stopHookCalls += 1;
+          return stopHookCalls === 1 ? "continue once" : null;
+        },
+      } as never,
+      messages: [userMessage("hello")],
+    }),
+  );
 
-    assert.equal(result.stopReason, "end_turn");
-    assert.deepEqual(requestedMaxTokens, [8000, 64000, 8000]);
-  } finally {
-    client.messages.create = originalCreate;
-  }
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(requestedMaxTokens, [8000, 64000, 8000]);
 });
 
 test("agentLoop retries transient network errors without consuming turns", async () => {
-  const originalCreate = client.messages.create;
   const requestedMaxTokens: number[] = [];
 
-  client.messages.create = (async (params: Anthropic.Messages.MessageCreateParams) => {
-    requestedMaxTokens.push(params.max_tokens);
+  const provider = fakeProvider((_request, call) => {
+    requestedMaxTokens.push(call.options?.maxTokens ?? -1);
     if (requestedMaxTokens.length === 1) {
       throw {
         code: "ECONNRESET",
@@ -226,69 +226,59 @@ test("agentLoop retries transient network errors without consuming turns", async
         headers: new Headers({ "retry-after-ms": "1" }),
       };
     }
-    return textResponse("network recovered", "end_turn");
-  }) as typeof client.messages.create;
+    return textResponse("network recovered", "stop");
+  });
 
-  try {
-    const result = await agentLoop(
-      new Agent({
-        toolRuntime: emptyRuntime as never,
-        maxTurns: 1,
-        messages: [{ role: "user", content: "hello" }],
-      }),
-    );
+  const result = await agentLoop(
+    new Agent({
+      toolRuntime: emptyRuntime as never,
+      provider,
+      maxTurns: 1,
+      messages: [userMessage("hello")],
+    }),
+  );
 
-    assert.equal(result.stopReason, "end_turn");
-    assert.deepEqual(requestedMaxTokens, [8000, 8000]);
-  } finally {
-    client.messages.create = originalCreate;
-  }
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(requestedMaxTokens, [8000, 8000]);
 });
 
 test("agentLoop uses fallback model after three consecutive overloads", async () => {
-  const originalCreate = client.messages.create;
-  const originalFallbackModel = process.env.FALLBACK_MODEL_ID;
-  const requestedModels: unknown[] = [];
-  process.env.FALLBACK_MODEL_ID = "fallback-model";
+  const fallback = testModel("fallback-model");
 
-  client.messages.create = (async (params: Anthropic.Messages.MessageCreateParams) => {
-    requestedModels.push(params.model);
-    if (requestedModels.length <= 3) {
-      throw {
-        status: 529,
-        message: "overloaded",
-        headers: new Headers({ "retry-after-ms": "1" }),
-      };
-    }
-    return textResponse("fallback ok", "end_turn");
-  }) as typeof client.messages.create;
+  const provider = fakeProvider(
+    () => {
+      if (provider.calls.length <= 3) {
+        throw {
+          status: 529,
+          message: "overloaded",
+          headers: new Headers({ "retry-after-ms": "1" }),
+        };
+      }
+      return textResponse("fallback ok", "stop");
+    },
+    { fallbackModel: fallback },
+  );
 
-  try {
-    const result = await agentLoop(
-      new Agent({
-        toolRuntime: emptyRuntime as never,
-        messages: [{ role: "user", content: "hello" }],
-      }),
-    );
+  const result = await agentLoop(
+    new Agent({
+      toolRuntime: emptyRuntime as never,
+      provider,
+      messages: [userMessage("hello")],
+    }),
+  );
 
-    assert.equal(result.stopReason, "end_turn");
-    assert.deepEqual(requestedModels, [getModel(), getModel(), getModel(), "fallback-model"]);
-  } finally {
-    client.messages.create = originalCreate;
-    if (originalFallbackModel === undefined) {
-      delete process.env.FALLBACK_MODEL_ID;
-    } else {
-      process.env.FALLBACK_MODEL_ID = originalFallbackModel;
-    }
-  }
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(
+    provider.calls.map((call) => call.model.id),
+    ["test-model", "test-model", "test-model", "fallback-model"],
+  );
 });
 
 test("agentLoop returns an error result when reactive compaction fails", async () => {
-  const originalCreate = client.messages.create;
   const workspace = await mkdtemp(path.join(tmpdir(), "agent-compact-"));
   let calls = 0;
 
-  client.messages.create = (async () => {
+  const provider = fakeProvider(() => {
     calls += 1;
     if (calls === 1) {
       throw {
@@ -302,14 +292,15 @@ test("agentLoop returns an error result when reactive compaction fails", async (
       message: "summary call reset",
       headers: new Headers(),
     };
-  }) as unknown as typeof client.messages.create;
+  });
 
   try {
     const result = await agentLoop(
       new Agent({
         toolRuntime: emptyRuntime as never,
+        provider,
         workspaceRoot: workspace,
-        messages: [{ role: "user", content: "hello" }],
+        messages: [userMessage("hello")],
       }),
     );
 
@@ -319,39 +310,34 @@ test("agentLoop returns an error result when reactive compaction fails", async (
       /Compaction failed/,
     );
   } finally {
-    client.messages.create = originalCreate;
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("agentLoop uses the runtime's tool definitions when the agent sets no allowedTools", async () => {
-  const originalCreate = client.messages.create;
   const fallbackTool = toolDefinition("fallback_tool");
-  let observedTools: Anthropic.Messages.MessageCreateParams["tools"];
+  let observedTools: unknown;
 
-  client.messages.create = (async (params: Anthropic.Messages.MessageCreateParams) => {
-    observedTools = params.tools;
-    return textResponse("done", "end_turn");
-  }) as typeof client.messages.create;
+  const provider = fakeProvider((request) => {
+    observedTools = request.tools;
+    return textResponse("done", "stop");
+  });
 
   const runtime = {
     getToolDefinitions: () => [fallbackTool],
     invokeTool: async () => "",
   };
 
-  try {
-    const result = await agentLoop(
-      new Agent({
-        toolRuntime: runtime as never,
-        messages: [{ role: "user", content: "hello" }],
-      }),
-    );
+  const result = await agentLoop(
+    new Agent({
+      toolRuntime: runtime as never,
+      provider,
+      messages: [userMessage("hello")],
+    }),
+  );
 
-    assert.equal(result.stopReason, "end_turn");
-    assert.deepEqual(observedTools!, [fallbackTool]);
-  } finally {
-    client.messages.create = originalCreate;
-  }
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(observedTools, [fallbackTool]);
 });
 
 test("agentLoop rejects unknown allowed tools instead of silently filtering", async () => {
@@ -372,37 +358,25 @@ test("agentLoop rejects unknown allowed tools instead of silently filtering", as
       agentLoop(
         new Agent({
           toolRuntime: runtime as never,
+          provider: fakeProvider(() => textResponse("unused", "stop")),
           allowedTools: ["fallback_tool", "missing_tool"],
-          messages: [{ role: "user", content: "hello" }],
+          messages: [userMessage("hello")],
         }),
       ),
     /Unknown allowed tool\(s\): missing_tool/,
   );
 });
 
-test("agentLoop returns thrown tool errors as tool_result content", async () => {
-  const originalCreate = client.messages.create;
-  const userMessages: Anthropic.Messages.MessageParam[] = [];
-  let calls = 0;
+test("agentLoop returns thrown tool errors as toolResult content", async () => {
+  const seenMessages: unknown[] = [];
 
-  client.messages.create = (async (params: Anthropic.Messages.MessageCreateParams) => {
-    calls += 1;
-    userMessages.push(...params.messages.filter((msg) => msg.role === "user"));
-    if (calls === 1) {
-      return {
-        ...textResponse("", "tool_use"),
-        content: [
-          {
-            type: "tool_use",
-            id: "toolu_test",
-            name: "explode",
-            input: {},
-          },
-        ],
-      };
+  const provider = fakeProvider((request) => {
+    seenMessages.push(request.messages);
+    if (seenMessages.length === 1) {
+      return toolCallMessage([toolCall("explode", {}, "toolu_test")]);
     }
-    return textResponse("handled tool error", "end_turn");
-  }) as typeof client.messages.create;
+    return textResponse("handled tool error", "stop");
+  });
 
   const toolRuntime = {
     getToolDefinitions: () => [],
@@ -411,38 +385,23 @@ test("agentLoop returns thrown tool errors as tool_result content", async () => 
     },
   };
 
-  try {
-    const result = await agentLoop(
-      new Agent({
-        toolRuntime: toolRuntime as never,
-        messages: [{ role: "user", content: "hello" }],
-      }),
-    );
+  const result = await agentLoop(
+    new Agent({
+      toolRuntime: toolRuntime as never,
+      provider,
+      messages: [userMessage("hello")],
+    }),
+  );
 
-    assert.equal(result.stopReason, "end_turn");
-    const toolResultMessage = userMessages.find(
-      (msg) =>
-        Array.isArray(msg.content) && msg.content.some((block) => block.type === "tool_result"),
-    );
-    assert.ok(toolResultMessage);
-    assert.match(JSON.stringify(toolResultMessage), /Error: tool blew up/);
-  } finally {
-    client.messages.create = originalCreate;
-  }
+  assert.equal(result.stopReason, "stop");
+  const lastMessages = seenMessages.at(-1) as Array<{ role: string }>;
+  const toolResult = lastMessages.find((message) => message.role === "toolResult");
+  assert.ok(toolResult);
+  assert.match(JSON.stringify(toolResult), /Error: tool blew up/);
 });
 
-test("decideRecovery aborts instead of continuing truncated tool_use output", () => {
-  const response = {
-    ...textResponse("", "max_tokens"),
-    content: [
-      {
-        type: "tool_use",
-        id: "toolu_partial",
-        name: "bash",
-        input: {},
-      },
-    ],
-  } as Anthropic.Messages.Message;
+test("decideRecovery aborts instead of continuing truncated toolCall output", () => {
+  const response = assistantMessage([toolCall("bash", {}, "toolu_partial")], "length");
 
   const action = decideRecovery(
     { kind: "success", response },
@@ -450,5 +409,5 @@ test("decideRecovery aborts instead of continuing truncated tool_use output", ()
   );
 
   assert.equal(action.type, "abort");
-  assert.match(action.message, /truncated.*tool_use/i);
+  assert.match(action.message, /truncated.*toolCall/i);
 });

@@ -3,7 +3,7 @@ import type { ToolDefinition } from "../types.js";
 export type McpToolSchema = {
   name: string;
   description?: string;
-  inputSchema?: ToolDefinition["input_schema"];
+  inputSchema?: ToolDefinition["parameters"];
 };
 
 export type McpTextContent = {

@@ -1,4 +1,4 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 
 // ── Constants ──
 
@@ -32,15 +32,15 @@ export type RecoveryAction =
       type: "backoff_and_retry";
       delayMs: number;
       nextState: RecoveryState;
-      nextModel?: string;
+      nextModel?: Model<Api>;
     }
   | { type: "abort"; message: string };
 
 export type LLMOutcome =
-  { kind: "success"; response: Anthropic.Messages.Message } | { kind: "error"; error: unknown };
+  { kind: "success"; response: AssistantMessage } | { kind: "error"; error: unknown };
 
 export type RecoveryOptions = {
-  fallbackModel?: string;
+  fallbackModel?: Model<Api>;
 };
 
 // ── State factory ──
@@ -96,6 +96,14 @@ function isTransientNetworkError(error: unknown): boolean {
 
   const name = typeof e.name === "string" ? e.name.toLowerCase() : "";
   if (name.includes("apiconnection")) return true;
+
+  // pi-ai collapses transport failures into a message ("fetch failed",
+  // "socket hang up") and drops the original error code.
+  const message = typeof e.message === "string" ? e.message.toLowerCase() : "";
+  if (message.includes("fetch failed") || message.includes("socket hang up")) return true;
+  for (const code of transientCodes) {
+    if (message.includes(code.toLowerCase())) return true;
+  }
 
   return false;
 }
@@ -169,8 +177,8 @@ function formatError(error: unknown): string {
   return `Unknown error: ${String(error).slice(0, 200)}`;
 }
 
-function hasToolUse(response: Anthropic.Messages.Message): boolean {
-  return response.content.some((block) => block.type === "tool_use");
+function hasToolUse(response: AssistantMessage): boolean {
+  return response.content.some((block) => block.type === "toolCall");
 }
 
 // ── Decision engine ──
@@ -270,7 +278,7 @@ export function decideRecovery(
   const response = outcome.response;
 
   // Output truncated
-  if (response.stop_reason === "max_tokens") {
+  if (response.stopReason === "length") {
     // First escalation: don't append truncated output, retry same request
     if (!state.hasEscalated) {
       return {
@@ -283,7 +291,7 @@ export function decideRecovery(
     if (hasToolUse(response)) {
       return {
         type: "abort",
-        message: "Output truncated during tool_use; cannot continue safely.",
+        message: "Output truncated during toolCall; cannot continue safely.",
       };
     }
     if (state.recoveryCount < MAX_RECOVERY_RETRIES) {

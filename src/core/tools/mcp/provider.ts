@@ -52,7 +52,7 @@ function createMcpRegisteredTool(
   const definition: ToolDefinition = {
     name: mcpToolName(options.serverName, schema.name),
     description: schema.description ?? `MCP tool '${schema.name}' from ${options.serverName}.`,
-    input_schema: schema.inputSchema ?? {
+    parameters: schema.inputSchema ?? {
       type: "object",
       properties: {},
     },

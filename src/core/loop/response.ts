@@ -1,7 +1,7 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentLoopStopReason } from "./loop.js";
 
-function textFromContent(content: Anthropic.Messages.Message["content"]): string {
+function textFromContent(content: AssistantMessage["content"]): string {
   const parts: string[] = [];
   for (const block of content) {
     if (block.type !== "text") continue;
@@ -12,11 +12,11 @@ function textFromContent(content: Anthropic.Messages.Message["content"]): string
 }
 
 export function describeFinalResponse(
-  content: Anthropic.Messages.Message["content"],
+  content: AssistantMessage["content"],
   stopReason: AgentLoopStopReason,
 ): string {
   const text = textFromContent(content);
   if (text !== "") return text;
   const blockTypes = [...new Set(content.map((b) => b.type))].join(",");
-  return `[no text response] stop_reason=${stopReason ?? "unknown"}, blocks=${blockTypes || "none"}`;
+  return `[no text response] stopReason=${stopReason ?? "unknown"}, blocks=${blockTypes || "none"}`;
 }

@@ -1,18 +1,15 @@
-import Anthropic from "@anthropic-ai/sdk";
 import "dotenv/config";
 
-let cachedClient: Anthropic | undefined;
+/** pi-ai provider id. Defaults to Anthropic; other built-in providers work via the catalog. */
+export function getProviderId(): string {
+  const provider = process.env.COIL_LLM_PROVIDER?.trim();
+  return provider && provider.length > 0 ? provider : "anthropic";
+}
 
-export function getClient(): Anthropic {
-  if (cachedClient !== undefined) return cachedClient;
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is required");
-  const baseURL = process.env.ANTHROPIC_BASE_URL;
-  cachedClient = new Anthropic({
-    apiKey,
-    ...(baseURL ? { baseURL } : {}),
-  });
-  return cachedClient;
+/** Anthropic-compatible gateway endpoint. Applied to the resolved model's baseUrl. */
+export function getBaseUrl(): string | undefined {
+  const baseUrl = process.env.ANTHROPIC_BASE_URL?.trim();
+  return baseUrl && baseUrl.length > 0 ? baseUrl : undefined;
 }
 
 export function getModel(): string {
