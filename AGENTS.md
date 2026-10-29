@@ -8,7 +8,8 @@ rules here override general defaults when they conflict.
 coil-core is an embeddable, local-first coding agent engine: a small trusted core,
 real MCP, concurrent subagents, observable execution, session persistence, and reports.
 The engine lives under `src/core/` (zero UI dependencies); `src/tui/` is an Ink/React
-consumer; `examples/` shows headless embedding.
+consumer; `examples/` shows headless embedding. Model access goes through pi-ai
+(`src/core/providers/`); the public documentation is `README.md` and this file only.
 
 ## Commands
 
@@ -20,12 +21,16 @@ consumer; `examples/` shows headless embedding.
 ## Runtime Constraints
 
 - `src/core/config/index.ts` resolves provider env **lazily** — importing it never throws;
-  `getClient()`/`getModel()` throw on first use if env is missing. `main.ts` still wraps
-  the TUI import in a try/catch to render a setup guide on failure.
+  `getModel()` and `createDefaultProvider()` throw on first use if env is missing. `main.ts`
+  still wraps the TUI import in a try/catch to render a setup guide on failure.
 - ESM with `module`/`moduleResolution: NodeNext`; source imports use the `.js` suffix
   even when importing `.ts` files (`./foo.js` → `./foo.ts`).
-- Tests use `node:test` + `node:assert/strict` through `tsx`; model-loop tests patch
-  `getClient().messages.create` (the shared cached client), restored in `finally`.
+- Tests use `node:test` + `node:assert/strict` through `tsx`; model-loop tests inject a
+  scripted `Provider` (`tests/helpers/pi.ts`) into the `Agent` instead of patching a client.
+- `src/core/providers/` is the only layer that imports pi-ai. Do not import vendor SDKs
+  (`@anthropic-ai/sdk`, `openai`, ...) elsewhere. Provider failures must throw
+  `ProviderRequestError` with the HTTP status and `retry-after` preserved, because
+  `loop/recovery.ts` classifies on those fields.
 
 ## Architecture Invariants (do not break)
 
@@ -44,6 +49,9 @@ consumer; `examples/` shows headless embedding.
    as NodeNext ESM import specifiers.
 7. Every directory under `src/core/` has an `index.ts` barrel re-exporting only that
    module's public API; `src/core/index.ts` is the library's public surface.
+8. Agent context is pi-ai's `Message[]`; tools are pi-ai `Tool` with `parameters`.
+   Persisted `lead-messages.json` uses that format; legacy Anthropic transcripts are
+   converted on load by `session/store/legacyMessages.ts`.
 
 ## Tools, State, and Docs
 

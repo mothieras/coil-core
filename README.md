@@ -13,15 +13,19 @@ Most coding agents are black boxes wired to a single cloud model. `coil-core` is
 - **Observable.** Every run is event-sourced: a single funnel writes `events.jsonl` + a pure snapshot + view events. Replay any session.
 - **Real MCP.** Stdio MCP clients register as `mcp__server__tool` through the normal registry — no special dispatch path.
 - **Concurrent subagents.** Fork agents with narrowed tool scopes; completions auto-wake the lead.
-- **Provider-agnostic.** The loop talks to a `Provider` interface; the default is Anthropic. Inject your own to route elsewhere.
+- **Provider-agnostic.** The loop talks to a `Provider` interface backed by pi-ai, so the default Anthropic path can be swapped for any built-in provider or a custom endpoint without touching the loop.
 
 ## Quickstart (TUI)
 
 ```bash
 pnpm install
-cp .env.example .env   # fill in ANTHROPIC_API_KEY + MODEL_ID
+cp .env.example .env   # fill in provider credentials + MODEL_ID
 pnpm dev               # launch the Ink TUI
 ```
+
+## Providers
+
+The default provider is Anthropic, backed by [pi-ai](https://github.com/earendil-works/pi). Set `COIL_LLM_PROVIDER` to any pi-ai built-in provider id (`openai`, `google`, `openrouter`, `zai`, `moonshotai`, `minimax`, `deepseek`, ...). `ANTHROPIC_BASE_URL` still routes Anthropic-compatible gateways and arbitrary model ids. See `.env.example` for the supported variables.
 
 ## Embed headlessly
 
@@ -31,16 +35,16 @@ tsx examples/headless-agent.ts "explain this repo's entry point"
 ```
 
 ```ts
-import { createAppContext, createAnthropicProvider, Agent, agentLoop } from "coil-core";
+import { createAppContext, createDefaultProvider, Agent, agentLoop } from "coil-core";
 
 const app = createAppContext(process.cwd(), {});
 const agent = new Agent({
   system: "You are a concise coding agent.",
   workspaceRoot: process.cwd(),
   toolRuntime: app.toolRuntime,
-  provider: createAnthropicProvider(),
+  provider: createDefaultProvider(),
   hooks: app.hooks,
-  messages: [{ role: "user", content: prompt }],
+  messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
 });
 const result = await agentLoop(agent, {});
 ```
@@ -74,7 +78,8 @@ src/
 | `pnpm typecheck`       | `tsc --noEmit` on `src/`  |
 | `pnpm typecheck:tests` | typecheck `tests/`        |
 | `pnpm build`           | `tsc` → `dist/`           |
-| `pnpm lint`            | ESLint + Prettier check   |
+| `pnpm lint`            | ESLint                    |
+| `pnpm format:check`    | Prettier check            |
 
 See `AGENTS.md` for the invariants agents must preserve.
 
