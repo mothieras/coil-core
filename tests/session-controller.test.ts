@@ -3,9 +3,7 @@ import assert from "node:assert/strict";
 import fs, { mkdtemp, readFile, rm } from "node:fs/promises";
 import os, { tmpdir } from "node:os";
 import path from "node:path";
-import type Anthropic from "@anthropic-ai/sdk";
-import { getClient } from "../src/core/config/index.js";
-const client = getClient();
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { Agent } from "../src/core/agent/agent.js";
 import { SessionController } from "../src/core/session/controller.js";
 import type { SessionCompactResult } from "../src/core/session/commands/actions.js";
@@ -19,38 +17,21 @@ import type {
 } from "../src/core/session/types.js";
 import { createSessionRecord } from "../src/core/session/types.js";
 import type { SessionViewEvent } from "../src/core/session/viewEvents.js";
+import {
+  fakeProvider,
+  textMessage,
+  toolCall,
+  toolCallMessage,
+  usage,
+  userMessage,
+} from "./helpers/pi.js";
 
-function textResponse(text: string): Anthropic.Messages.Message {
-  return {
-    id: "msg_session_controller_test",
-    type: "message",
-    role: "assistant",
-    model: "test-model",
-    content: [{ type: "text", text, citations: null }],
-    stop_reason: "end_turn",
-    stop_sequence: null,
-    usage: { input_tokens: 1, output_tokens: 1 },
-  } as unknown as Anthropic.Messages.Message;
+function textResponse(text: string): AssistantMessage {
+  return textMessage(text);
 }
 
-function toolUseResponse(name: string, input: Record<string, unknown>): Anthropic.Messages.Message {
-  return {
-    id: "msg_session_controller_tool_use_test",
-    type: "message",
-    role: "assistant",
-    model: "test-model",
-    content: [
-      {
-        type: "tool_use",
-        id: "toolu_session_controller_test",
-        name,
-        input,
-      },
-    ],
-    stop_reason: "tool_use",
-    stop_sequence: null,
-    usage: { input_tokens: 1, output_tokens: 1 },
-  } as unknown as Anthropic.Messages.Message;
+function toolUseResponse(name: string, input: Record<string, unknown>): AssistantMessage {
+  return toolCallMessage([toolCall(name, input, "toolu_session_controller_test")]);
 }
 
 function emptyRuntime() {
@@ -62,12 +43,13 @@ function emptyRuntime() {
 
 function testLeadAgent(
   workspaceRoot: string,
-  _createMessage: () => Promise<Anthropic.Messages.Message>,
+  createMessage: () => Promise<AssistantMessage>,
 ): Agent {
   return new Agent({
     id: "lead",
     workspaceRoot,
     toolRuntime: emptyRuntime(),
+    provider: fakeProvider(() => createMessage()),
   });
 }
 
@@ -96,7 +78,7 @@ class FlakyFlushStore extends SessionStore {
 
   override async saveLeadMessages(
     _sessionId: string,
-    _messages: readonly Anthropic.Messages.MessageParam[],
+    _messages: readonly Message[],
   ): Promise<void> {}
 
   override async saveSnapshot(_sessionId: string, _snapshot: SessionSnapshot): Promise<void> {}
@@ -272,17 +254,16 @@ test("SessionController.resume clears stale MCP provider diagnostics", async () 
 
 test("SessionController.compact records compact events and saves lead state", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "session-controller-"));
-  const original = client.messages.create;
-  client.messages.create = (async () =>
-    textResponse("compacted summary")) as unknown as typeof client.messages.create;
+  const provider = fakeProvider(() => textResponse("compacted summary"));
   try {
     const store = new SessionStore(workspace);
     const controller = await SessionController.createNew({
       sessionId: "session_compact_action",
       workspaceRoot: workspace,
       store,
+      provider,
     });
-    controller.leadAgentState.messages.push({ role: "user", content: "hello" });
+    controller.leadAgentState.messages.push(userMessage("hello"));
 
     const result = await controller.compact("manual slash command");
 
@@ -335,32 +316,31 @@ test("SessionController.compact records compact events and saves lead state", as
       true,
     );
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController refuses to compact while a turn is running", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "session-controller-"));
-  const original = client.messages.create;
   let calls = 0;
   let releaseTurn: () => void = () => {};
   const turnGate = new Promise<void>((resolve) => {
     releaseTurn = resolve;
   });
-  client.messages.create = (async () => {
+  const provider = fakeProvider(async () => {
     calls += 1;
     if (calls === 1) await turnGate; // hold the lead turn open mid-flight
-    return textResponse("assistant reply");
-  }) as unknown as typeof client.messages.create;
+    return textMessage("assistant reply", "stop", usage(1, 1));
+  });
   try {
     const store = new SessionStore(workspace);
     const controller = await SessionController.createNew({
       sessionId: "session_compact_busy",
       workspaceRoot: workspace,
       store,
+      provider,
     });
-    controller.leadAgentState.messages.push({ role: "user", content: "hello" });
+    controller.leadAgentState.messages.push(userMessage("hello"));
 
     // Start a turn that blocks inside the model call; `running` is now true.
     const turn = controller.handleUserMessage("hello");
@@ -381,7 +361,6 @@ test("SessionController refuses to compact while a turn is running", async () =>
     const ok = await controller.handleSlashCommand("/compact");
     assert.equal((ok as SessionCompactResult).compacted, true);
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
@@ -438,31 +417,36 @@ test("SessionController.handleSlashCommand returns notices and writes reports", 
 
 test("SessionController.handleSlashCommand /ping reports latency and surfaces failures", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "session-controller-"));
-  const original = client.messages.create;
   const originalModel = process.env.MODEL_ID;
   process.env.MODEL_ID = "test-model";
+  const scripts = [
+    () => textResponse("pong"),
+    (): AssistantMessage => {
+      throw new Error("api unreachable");
+    },
+  ];
+  const provider = fakeProvider(() => {
+    const next = scripts.shift();
+    if (!next) throw new Error("unexpected extra model call");
+    return next();
+  });
   try {
     const controller = await SessionController.createNew({
       sessionId: "session_ping_action",
       workspaceRoot: workspace,
+      provider,
     });
 
-    client.messages.create = (async () =>
-      textResponse("pong")) as unknown as typeof client.messages.create;
     const ok = await controller.handleSlashCommand("/ping");
     assert.equal(ok.action, "notice");
     assert.equal(ok.title, "Ping OK");
-    assert.match(ok.body, /^\d+ms model=test-model in=1 out=1$/);
+    assert.match(ok.body, /^\d+ms model=test-model in=0 out=0$/);
 
-    client.messages.create = (async () => {
-      throw new Error("api unreachable");
-    }) as unknown as typeof client.messages.create;
     const failed = await controller.handleSlashCommand("/ping");
     assert.equal(failed.action, "notice");
     assert.equal(failed.title, "Ping Failed");
     assert.match(failed.body, /model=test-model error=api unreachable/);
   } finally {
-    client.messages.create = original;
     process.env.MODEL_ID = originalModel;
     await rm(workspace, { recursive: true, force: true });
   }
@@ -470,19 +454,19 @@ test("SessionController.handleSlashCommand /ping reports latency and surfaces fa
 
 test("SessionController auto-titles the session after the first turn", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "session-controller-"));
-  const original = client.messages.create;
   let calls = 0;
-  client.messages.create = (async () => {
+  const provider = fakeProvider(() => {
     calls += 1;
     // Call 1: the first turn. Call 2: the title request. Call 3: second turn.
     return calls === 2 ? textResponse("Fix Login Flow") : textResponse("assistant reply");
-  }) as unknown as typeof client.messages.create;
+  });
   try {
     const store = new SessionStore(workspace);
     const controller = await SessionController.createNew({
       sessionId: "session_autotitle",
       workspaceRoot: workspace,
       store,
+      provider,
     });
 
     await controller.handleUserMessage("please fix the login bug");
@@ -495,7 +479,6 @@ test("SessionController auto-titles the session after the first turn", async () 
     assert.equal(calls, callsAfterFirst + 1, "second turn must not re-title");
     assert.equal(controller.getSnapshot().session?.title, "Fix Login Flow");
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
@@ -698,18 +681,18 @@ test("SessionController.close records a closed session", async () => {
 
 test("SessionController.resume restores lead messages and continues the same session", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "session-controller-"));
-  const original = client.messages.create;
   let calls = 0;
-  client.messages.create = (async () => {
+  const provider = fakeProvider(() => {
     calls += 1;
     return textResponse(calls === 1 ? "first reply" : "second reply");
-  }) as unknown as typeof client.messages.create;
+  });
   try {
     const store = new SessionStore(workspace);
     const first = await SessionController.createNew({
       sessionId: "session_resume",
       workspaceRoot: workspace,
       store,
+      provider,
     });
     await first.handleUserMessage("first");
     await first.flush();
@@ -718,6 +701,7 @@ test("SessionController.resume restores lead messages and continues the same ses
       sessionId: "session_resume",
       workspaceRoot: workspace,
       store,
+      provider,
     });
     assert.equal(resumed.getSnapshot().session?.id, "session_resume");
     assert.equal(resumed.leadAgentState.messages.length, first.leadAgentState.messages.length);
@@ -728,28 +712,27 @@ test("SessionController.resume restores lead messages and continues the same ses
     assert.equal(resumed.getSnapshot().conversationMessages.at(-1)?.content, "second reply");
     assert.equal(resumed.getSnapshot().session?.id, "session_resume");
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController.resume applies checkPermission to the default lead agent", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "session-controller-"));
-  const original = client.messages.create;
   const permissionContexts: string[] = [];
   let calls = 0;
-  client.messages.create = (async () => {
+  const provider = fakeProvider(() => {
     calls += 1;
     return calls === 1
       ? toolUseResponse("bash", { command: "rm resumed-important" })
       : textResponse("assistant reply");
-  }) as unknown as typeof client.messages.create;
+  });
   try {
     const store = new SessionStore(workspace);
     const first = await SessionController.createNew({
       sessionId: "session_resume_permission",
       workspaceRoot: workspace,
       store,
+      provider,
     });
     await first.flush();
 
@@ -757,6 +740,7 @@ test("SessionController.resume applies checkPermission to the default lead agent
       sessionId: "session_resume_permission",
       workspaceRoot: workspace,
       store,
+      provider,
       checkPermission: async (context) => {
         permissionContexts.push(`${context.sessionId}:${context.toolName}:${context.agentKind}`);
         return { allowed: false, requested: true, reason: "blocked after resume" };
@@ -769,7 +753,6 @@ test("SessionController.resume applies checkPermission to the default lead agent
     assert.equal(resumed.getSnapshot().permissionDecisions[0]?.allowed, false);
     assert.equal(resumed.getSnapshot().permissionDecisions[0]?.reason, "blocked after resume");
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
@@ -815,13 +798,12 @@ test("SessionController.resume reopens a closed session and close records it aga
 
 test("SessionController.handleAutoWake records an auto-wake agent run", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "session-controller-"));
-  const original = client.messages.create;
-  client.messages.create = (async () =>
-    textResponse("handled async result")) as unknown as typeof client.messages.create;
+  const provider = fakeProvider(() => textResponse("handled async result"));
   try {
     const controller = await SessionController.createNew({
       sessionId: "session_wake",
       workspaceRoot: workspace,
+      provider,
     });
 
     await controller.handleAutoWake("subagent_finished");
@@ -829,26 +811,25 @@ test("SessionController.handleAutoWake records an auto-wake agent run", async ()
     assert.equal(controller.getSnapshot().agentRuns[0]?.trigger.type, "auto_wake");
     assert.equal(controller.getSnapshot().agentRuns[0]?.status, "completed");
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController.createNew applies checkPermission to the default lead agent", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "session-controller-"));
-  const original = client.messages.create;
   const permissionContexts: string[] = [];
   let calls = 0;
-  client.messages.create = (async () => {
+  const provider = fakeProvider(() => {
     calls += 1;
     return calls === 1
       ? toolUseResponse("bash", { command: "rm important" })
       : textResponse("assistant reply");
-  }) as unknown as typeof client.messages.create;
+  });
   try {
     const controller = await SessionController.createNew({
       sessionId: "session_default_permission",
       workspaceRoot: workspace,
+      provider,
       checkPermission: async (context) => {
         permissionContexts.push(`${context.sessionId}:${context.toolName}:${context.agentKind}`);
         return { allowed: false, requested: true, reason: "blocked by test" };
@@ -861,15 +842,14 @@ test("SessionController.createNew applies checkPermission to the default lead ag
     assert.equal(controller.getSnapshot().permissionDecisions[0]?.allowed, false);
     assert.equal(controller.getSnapshot().permissionDecisions[0]?.reason, "blocked by test");
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController records subagent started and finished projections", async () => {
-  const original = client.messages.create;
-  client.messages.create = (async (params: Anthropic.Messages.MessageCreateParamsNonStreaming) => {
-    const messages = params.messages;
+  const workspace = await tempWorkspace();
+  const provider = fakeProvider((request) => {
+    const messages = request.messages;
     const last = messages[messages.length - 1];
     if (messages.length === 1 && last?.role === "user" && last.content === "spawn reviewer") {
       return toolUseResponse("subagent", { prompt: "review docs" });
@@ -878,13 +858,13 @@ test("SessionController records subagent started and finished projections", asyn
       return textResponse("sub done");
     }
     return textResponse("assistant reply");
-  }) as unknown as typeof client.messages.create;
+  });
   try {
-    const workspace = await tempWorkspace();
     const leadAgent = new Agent({
       id: "lead",
       workspaceRoot: workspace,
       toolRuntime: emptyRuntime(),
+      provider,
     });
     const controller = await SessionController.createNew({
       workspaceRoot: workspace,
@@ -905,29 +885,29 @@ test("SessionController records subagent started and finished projections", asyn
     );
     assert.ok(controller.getSnapshot().subagents[0]?.parentToolCallId);
   } finally {
-    client.messages.create = original;
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController.close marks running subagents interrupted before closing", async () => {
-  const original = client.messages.create;
   const workspace = await tempWorkspace();
-  client.messages.create = (async (params: Anthropic.Messages.MessageCreateParamsNonStreaming) => {
-    const messages = params.messages;
+  const provider = fakeProvider((request) => {
+    const messages = request.messages;
     const last = messages[messages.length - 1];
     if (messages.length === 1 && last?.role === "user" && last.content === "spawn slow reviewer") {
       return toolUseResponse("subagent", { prompt: "slow review" });
     }
     if (messages.length === 1 && last?.role === "user" && last.content === "slow review") {
-      return new Promise<Anthropic.Messages.Message>(() => {});
+      return new Promise<AssistantMessage>(() => {});
     }
     return textResponse("lead done");
-  }) as unknown as typeof client.messages.create;
+  });
   try {
     const controller = await SessionController.createNew({
       workspaceRoot: workspace,
       sessionId: "session_close_running_subagent",
       now: "2026-01-01T00:00:00.000Z",
+      provider,
     });
 
     await controller.handleUserMessage("spawn slow reviewer");
@@ -954,22 +934,20 @@ test("SessionController.close marks running subagents interrupted before closing
       "interrupted",
     );
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController handles a lead user turn and persists session state", async () => {
-  const original = client.messages.create;
-  client.messages.create = (async () =>
-    textResponse("assistant reply")) as unknown as typeof client.messages.create;
+  const provider = fakeProvider(() => textResponse("assistant reply"));
+  const workspace = await tempWorkspace();
   try {
-    const workspace = await tempWorkspace();
     const store = new SessionStore(workspace);
     const leadAgent = new Agent({
       id: "lead",
       workspaceRoot: workspace,
       toolRuntime: emptyRuntime(),
+      provider,
     });
     const controller = await SessionController.createNew({
       workspaceRoot: workspace,
@@ -1031,31 +1009,31 @@ test("SessionController handles a lead user turn and persists session state", as
     assert.deepEqual(await store.loadSnapshot("session_controller"), snapshot);
     const leadMessages = JSON.parse(
       await fs.readFile(path.join(dir, "lead-messages.json"), "utf8"),
-    ) as Anthropic.Messages.MessageParam[];
+    ) as Message[];
     assert.deepEqual(
       leadMessages.map((message) => message.role),
       ["user", "assistant"],
     );
   } finally {
-    client.messages.create = original;
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController keeps raw lead messages out of event and snapshot files", async () => {
   const rawSecret = "RAW_SESSION_SECRET_VALUE";
-  const original = client.messages.create;
   let calls = 0;
-  client.messages.create = (async () => {
+  const provider = fakeProvider(() => {
     calls += 1;
     if (calls === 1) return toolUseResponse("read_file", { api_key: rawSecret });
     return textResponse("assistant reply");
-  }) as unknown as typeof client.messages.create;
+  });
+  const workspace = await tempWorkspace();
   try {
-    const workspace = await tempWorkspace();
     const leadAgent = new Agent({
       id: "lead",
       workspaceRoot: workspace,
       toolRuntime: emptyRuntime(),
+      provider,
     });
     const controller = await SessionController.createNew({
       workspaceRoot: workspace,
@@ -1075,16 +1053,15 @@ test("SessionController keeps raw lead messages out of event and snapshot files"
     assert.equal(snapshot.includes(rawSecret), false);
     assert.equal(leadMessages.includes(rawSecret), true);
   } finally {
-    client.messages.create = original;
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController summarizes raw tool input and output in session files", async () => {
   const rawToolInput = "UNIQUE_RAW_FILE_CONTENT_FROM_TOOL_INPUT";
   const rawToolOutput = "UNIQUE_RAW_TOOL_RESULT_OUTPUT";
-  const original = client.messages.create;
   let calls = 0;
-  client.messages.create = (async () => {
+  const provider = fakeProvider(() => {
     calls += 1;
     if (calls === 1) {
       return toolUseResponse("raw_output", {
@@ -1092,13 +1069,14 @@ test("SessionController summarizes raw tool input and output in session files", 
       });
     }
     return textResponse("assistant reply");
-  }) as unknown as typeof client.messages.create;
+  });
+  const workspace = await tempWorkspace();
   try {
-    const workspace = await tempWorkspace();
     const leadAgent = new Agent({
       id: "lead",
       workspaceRoot: workspace,
       toolRuntime: emptyRuntime(),
+      provider,
     });
     const controller = await SessionController.createNew({
       workspaceRoot: workspace,
@@ -1111,7 +1089,7 @@ test("SessionController summarizes raw tool input and output in session files", 
       definition: {
         name: "raw_output",
         description: "Return raw output for session controller tests.",
-        input_schema: {
+        parameters: {
           type: "object",
           properties: {
             api_key: { type: "string" },
@@ -1136,25 +1114,25 @@ test("SessionController summarizes raw tool input and output in session files", 
     assert.equal(leadMessages.includes(rawToolInput), true);
     assert.equal(leadMessages.includes(rawToolOutput), true);
   } finally {
-    client.messages.create = original;
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController projects denied permission decisions", async () => {
-  const original = client.messages.create;
   let calls = 0;
-  client.messages.create = (async () => {
+  const provider = fakeProvider(() => {
     calls += 1;
     return calls === 1
       ? toolUseResponse("bash", { command: "echo blocked" })
       : textResponse("assistant reply");
-  }) as unknown as typeof client.messages.create;
+  });
+  const workspace = await tempWorkspace();
   try {
-    const workspace = await tempWorkspace();
     const leadAgent = new Agent({
       id: "lead",
       workspaceRoot: workspace,
       toolRuntime: emptyRuntime(),
+      provider,
       checkPermission: async () => ({ allowed: false, reason: "test denied" }),
     });
     const controller = await SessionController.createNew({
@@ -1169,26 +1147,26 @@ test("SessionController projects denied permission decisions", async () => {
     assert.equal(controller.getSnapshot().permissionDecisions[0]?.allowed, false);
     assert.equal(controller.getSnapshot().permissionDecisions[0]?.reason, "test denied");
   } finally {
-    client.messages.create = original;
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController redacts permission reasons in session files", async () => {
   const secret = "permission_token=abc123";
-  const original = client.messages.create;
   let calls = 0;
-  client.messages.create = (async () => {
+  const provider = fakeProvider(() => {
     calls += 1;
     return calls === 1
       ? toolUseResponse("bash", { command: "echo blocked" })
       : textResponse("assistant reply");
-  }) as unknown as typeof client.messages.create;
+  });
+  const workspace = await tempWorkspace();
   try {
-    const workspace = await tempWorkspace();
     const leadAgent = new Agent({
       id: "lead",
       workspaceRoot: workspace,
       toolRuntime: emptyRuntime(),
+      provider,
       checkPermission: async (context) => {
         context.emitPermissionRequested?.(`approval requires ${secret}`);
         return { allowed: false, requested: true, reason: `test denied ${secret}` };
@@ -1212,21 +1190,20 @@ test("SessionController redacts permission reasons in session files", async () =
     assert.equal(events.includes("[redacted]"), true);
     assert.equal(snapshot.includes("[redacted]"), true);
   } finally {
-    client.messages.create = original;
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController does not re-append events after a partial flush failure", async () => {
-  const original = client.messages.create;
-  client.messages.create = (async () =>
-    textResponse("assistant reply")) as unknown as typeof client.messages.create;
+  const provider = fakeProvider(() => textResponse("assistant reply"));
+  const workspace = await tempWorkspace();
   try {
-    const workspace = await tempWorkspace();
     const store = new FlakyFlushStore(workspace);
     const leadAgent = new Agent({
       id: "lead",
       workspaceRoot: workspace,
       toolRuntime: emptyRuntime(),
+      provider,
     });
     const controller = await SessionController.createNew({
       workspaceRoot: workspace,
@@ -1241,7 +1218,7 @@ test("SessionController does not re-append events after a partial flush failure"
 
     assert.equal(store.appendedEventIds.length, 1);
   } finally {
-    client.messages.create = original;
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 
@@ -1273,26 +1250,26 @@ test("SessionController emits normalized session_started events for TUI listener
 });
 
 test("SessionController subscribers receive normalized conversation and tool events", async () => {
-  const original = client.messages.create;
   const workspace = await tempWorkspace();
   let calls = 0;
-  client.messages.create = (async () => {
+  const provider = fakeProvider(() => {
     calls += 1;
     return calls === 1
       ? toolUseResponse("raw_output", { value: "input" })
       : textResponse("assistant reply");
-  }) as unknown as typeof client.messages.create;
+  });
   try {
     const controller = await SessionController.createNew({
       workspaceRoot: workspace,
       sessionId: "session_view_tool",
+      provider,
     });
     controller.appContext.toolRuntime.registerTool({
       name: "raw_output",
       definition: {
         name: "raw_output",
         description: "Return output for session view event tests.",
-        input_schema: { type: "object", properties: {} },
+        parameters: { type: "object", properties: {} },
       },
       handler: () => "tool output",
       source: { type: "builtin" },
@@ -1339,26 +1316,25 @@ test("SessionController subscribers receive normalized conversation and tool eve
     });
     assert.equal(events.length, 5);
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("SessionController normalizes permission lifecycle events for TUI listeners", async () => {
-  const original = client.messages.create;
   const workspace = await tempWorkspace();
   let calls = 0;
-  client.messages.create = (async () => {
+  const provider = fakeProvider(() => {
     calls += 1;
     return calls === 1
       ? toolUseResponse("bash", { command: "echo blocked" })
       : textResponse("assistant reply");
-  }) as unknown as typeof client.messages.create;
+  });
   try {
     const events: SessionViewEvent[] = [];
     const controller = await SessionController.createNew({
       workspaceRoot: workspace,
       sessionId: "session_view_permission",
+      provider,
       onSessionEvent: (event) => events.push(event),
       checkPermission: async (context) => {
         context.emitPermissionRequested?.("needs approval");
@@ -1381,7 +1357,6 @@ test("SessionController normalizes permission lifecycle events for TUI listeners
     assert.equal(resolved.decision.allowed, false);
     assert.equal(resolved.decision.reason, "denied by test");
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });

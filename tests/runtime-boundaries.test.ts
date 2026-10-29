@@ -4,9 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HookBus } from "../src/core/hooks/hookBus.js";
-import type Anthropic from "@anthropic-ai/sdk";
-import { getClient } from "../src/core/config/index.js";
-const client = getClient();
+import type { Message, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { createAppContext } from "../src/core/app/context.js";
 import { pushTaggedUserMessage } from "../src/core/hooks/messageInjection.js";
 import { registerRuntimeHooks } from "../src/core/hooks/runtimeHooks.js";
@@ -26,32 +24,17 @@ import { validateToolProfiles } from "../src/core/tools/profiles.js";
 import type { RegisteredTool } from "../src/core/tools/types.js";
 import { taskStatePath } from "../src/core/state/paths.js";
 import { AsyncWorkInbox } from "../src/core/async/asyncWorkInbox.js";
+import { fakeProvider, textMessage, toolCall } from "./helpers/pi.js";
 
 function toolDefinition(name: string) {
   return {
     name,
     description: `${name} test tool`,
-    input_schema: {
+    parameters: {
       type: "object" as const,
       properties: {},
     },
   };
-}
-
-function textResponse(
-  text: string,
-  stopReason: Anthropic.Messages.Message["stop_reason"] = "end_turn",
-): Anthropic.Messages.Message {
-  return {
-    id: "msg_test",
-    type: "message",
-    role: "assistant",
-    model: "test-model",
-    content: [{ type: "text", text, citations: null }],
-    stop_reason: stopReason,
-    stop_sequence: null,
-    usage: { input_tokens: 1, output_tokens: 1 },
-  } as unknown as Anthropic.Messages.Message;
 }
 
 function createRuntime(workspaceRoot: string): ToolRuntime {
@@ -108,7 +91,7 @@ function testTool(name: string, handler: RegisteredTool["handler"]): RegisteredT
     definition: {
       name,
       description: `${name} test tool`,
-      input_schema: {
+      parameters: {
         type: "object",
         properties: {},
       },
@@ -252,15 +235,7 @@ test("PreToolUse returns the first block reason", () => {
     return "also blocked";
   });
 
-  assert.equal(
-    hooks.triggerControl("PreToolUse", {
-      type: "tool_use",
-      id: "toolu_test",
-      name: "bash",
-      input: {},
-    } as Anthropic.Messages.ToolUseBlock),
-    "blocked",
-  );
+  assert.equal(hooks.triggerControl("PreToolUse", toolCall("bash", {}, "toolu_test")), "blocked");
   assert.deepEqual(calls, ["first"]);
 });
 
@@ -281,21 +256,20 @@ test("Stop returns the first continue reason", () => {
   assert.deepEqual(calls, ["first"]);
 });
 
-test("ToolResultsReady appends results through mutation", () => {
+test("ToolResultsReady appends followups through mutation", () => {
   const hooks = new HookBus();
-  const results = [{ type: "tool_result" as const, tool_use_id: "toolu_test", content: "ok" }];
+  const results: ToolResultMessage[] = [];
+  const followups: UserMessage[] = [];
+  const payload = { results, followups };
 
-  hooks.register("ToolResultsReady", (readyResults) => {
-    readyResults.push({ type: "text", text: "extra" });
-    return "ignored";
+  hooks.register("ToolResultsReady", (ready) => {
+    ready.followups.push({ role: "user", content: "extra", timestamp: 1 });
   });
 
-  hooks.emitEffect("ToolResultsReady", results);
+  hooks.emitEffect("ToolResultsReady", payload);
 
-  assert.deepEqual(results, [
-    { type: "tool_result", tool_use_id: "toolu_test", content: "ok" },
-    { type: "text", text: "extra" },
-  ]);
+  assert.deepEqual(followups, [{ role: "user", content: "extra", timestamp: 1 }]);
+  assert.deepEqual(results, []);
 });
 
 test("ToolRuntime resolves file tools against its workspace root", async () => {
@@ -353,7 +327,7 @@ test("ToolRuntime passes invocation context to handlers", async () => {
     definition: {
       name: "context_tool",
       description: "context",
-      input_schema: { type: "object", properties: {} },
+      parameters: { type: "object", properties: {} },
     },
     source: { type: "builtin" },
     handler: (_input, context) => {
@@ -442,7 +416,8 @@ test("subagent schema accepts optional role, name, task_id, and allowed_tools", 
     const subagent = app.toolRegistry.getDefinitions().find((tool) => tool.name === "subagent");
 
     assert.ok(subagent);
-    assert.deepEqual(Object.keys(subagent.input_schema.properties ?? {}).sort(), [
+    const schema = subagent.parameters as { properties?: Record<string, unknown> };
+    assert.deepEqual(Object.keys(schema.properties ?? {}).sort(), [
       "allowed_tools",
       "max_turns",
       "name",
@@ -457,9 +432,6 @@ test("subagent schema accepts optional role, name, task_id, and allowed_tools", 
 });
 
 test("subagent tool returns a sub_id immediately while the run continues", async () => {
-  const original = client.messages.create;
-  client.messages.create = (async () =>
-    textResponse("subagent done")) as unknown as typeof client.messages.create;
   const workspace = await mkdtemp(path.join(tmpdir(), "agent-runtime-"));
   try {
     const app = createAppContext(workspace);
@@ -467,6 +439,7 @@ test("subagent tool returns a sub_id immediately while the run continues", async
       toolRuntime: app.toolRuntime,
       hooks: app.hooks,
       workspaceRoot: workspace,
+      provider: fakeProvider(() => textMessage("subagent done")),
     });
 
     const out = await currentAgent.run(lead, () =>
@@ -479,7 +452,6 @@ test("subagent tool returns a sub_id immediately while the run continues", async
       await new Promise((resolve) => setImmediate(resolve));
     }
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
@@ -503,7 +475,11 @@ test("forkSubAgent puts role/name/workspace into the child's system prompt", () 
   assert.match(child.system, /reviewer/);
   assert.match(child.system, /code reviewer/);
   assert.match(child.system, /\/tmp\/workspace/);
-  assert.deepEqual(child.messages, [{ role: "user", content: "review docs" }]);
+  assert.equal(child.messages.length, 1);
+  const firstMessage = child.messages[0];
+  assert.ok(firstMessage && firstMessage.role === "user");
+  assert.equal(firstMessage.content, "review docs");
+  assert.equal(typeof firstMessage.timestamp, "number");
 });
 
 test("forkSubAgent narrows allowedTools to the profile and never widens it", () => {
@@ -569,21 +545,19 @@ test("requireNonEmptyString returns tool-scoped errors for missing text", () => 
 });
 
 test("pushTaggedUserMessage appends xml-like user blocks consistently", () => {
-  const messages: Anthropic.Messages.MessageParam[] = [];
+  const messages: Message[] = [];
 
   pushTaggedUserMessage(messages, "task-status", "one\ntwo");
   pushTaggedUserMessage(messages, "inbox", '{"text":"hi"}', "inline");
 
-  assert.deepEqual(messages, [
-    { role: "user", content: "<task-status>\none\ntwo\n</task-status>" },
-    { role: "user", content: '<inbox>{"text":"hi"}</inbox>' },
-  ]);
+  assert.equal(messages[0]?.role, "user");
+  assert.equal(messages[0]?.content, "<task-status>\none\ntwo\n</task-status>");
+  assert.equal(typeof messages[0]?.timestamp, "number");
+  assert.equal(messages[1]?.role, "user");
+  assert.equal(messages[1]?.content, '<inbox>{"text":"hi"}</inbox>');
 });
 
 test("subagent results inject in lead context only, not in subagent context", async () => {
-  const original = client.messages.create;
-  client.messages.create = (async () =>
-    textResponse("sub result payload")) as unknown as typeof client.messages.create;
   const workspace = await mkdtemp(path.join(tmpdir(), "agent-runtime-"));
   try {
     const app = createAppContext(workspace);
@@ -594,6 +568,7 @@ test("subagent results inject in lead context only, not in subagent context", as
       toolRuntime: app.toolRuntime,
       hooks: app.hooks,
       workspaceRoot: workspace,
+      provider: fakeProvider(() => textMessage("sub result payload")),
     });
     app.subAgentRunner.run(lead, "do thing");
     while (app.subAgentRunner.hasRunning()) {
@@ -601,7 +576,7 @@ test("subagent results inject in lead context only, not in subagent context", as
     }
 
     // Non-lead context must NOT drain the lead's subagent results.
-    const subMessages: Anthropic.Messages.MessageParam[] = [];
+    const subMessages: Message[] = [];
     const worker = new Agent({
       id: "worker-1",
       toolRuntime: app.toolRuntime,
@@ -611,21 +586,17 @@ test("subagent results inject in lead context only, not in subagent context", as
     assert.doesNotMatch(JSON.stringify(subMessages), /subagent-results/);
 
     // Lead context drains and injects the (still-present) result.
-    const leadMessages: Anthropic.Messages.MessageParam[] = [];
+    const leadMessages: Message[] = [];
     currentAgent.run(lead, () => app.hooks.emitEffect("PreLLMCall", leadMessages));
     const leadText = JSON.stringify(leadMessages);
     assert.match(leadText, /subagent-results/);
     assert.match(leadText, /sub result payload/);
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
 test("hasPendingAsyncWork reflects running subagents", async () => {
-  const original = client.messages.create;
-  client.messages.create = (async () =>
-    textResponse("done")) as unknown as typeof client.messages.create;
   const workspace = await mkdtemp(path.join(tmpdir(), "agent-runtime-"));
   try {
     const app = createAppContext(workspace);
@@ -636,6 +607,7 @@ test("hasPendingAsyncWork reflects running subagents", async () => {
       toolRuntime: app.toolRuntime,
       hooks: app.hooks,
       workspaceRoot: workspace,
+      provider: fakeProvider(() => textMessage("done")),
     });
     app.subAgentRunner.run(lead, "work");
     assert.equal(hasPendingAsyncWork(app), true);
@@ -645,7 +617,6 @@ test("hasPendingAsyncWork reflects running subagents", async () => {
     }
     assert.equal(hasPendingAsyncWork(app), false);
   } finally {
-    client.messages.create = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });

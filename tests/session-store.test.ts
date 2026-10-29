@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Message } from "@earendil-works/pi-ai";
 import { SessionStore, sessionPath } from "../src/core/session/store/sessionStore.js";
 import {
   applySessionEvents,
@@ -15,6 +15,7 @@ import {
   createSessionRecord,
   type SessionCreatedEvent,
 } from "../src/core/session/types.js";
+import { textMessage, userMessage } from "./helpers/pi.js";
 
 async function tempWorkspace(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "coil-session-store-"));
@@ -42,7 +43,7 @@ test("SessionStore creates session record and state files", async () => {
     conversationMessages: [message],
     leadAgentMessages: [{ role: "user" as const, contentSummary: "hello" }],
   };
-  const leadMessages = [{ role: "user" as const, content: "hello" }];
+  const leadMessages = [userMessage("hello")];
 
   await store.create(session);
   await store.saveConversation(session.id, [message]);
@@ -85,10 +86,7 @@ test("SessionStore loads persisted session state for resume", async () => {
   try {
     const store = new SessionStore(workspace);
     const session = createSessionRecord({ workspaceRoot: workspace, id: "s_resume" });
-    const leadMessages: Anthropic.Messages.MessageParam[] = [
-      { role: "user", content: "hello" },
-      { role: "assistant", content: "hi" },
-    ];
+    const leadMessages: Message[] = [userMessage("hello"), textMessage("hi")];
     const snapshot = applySessionEvents(createEmptySessionSnapshot(), [
       createSessionEvent<SessionCreatedEvent>({
         type: "session_created",

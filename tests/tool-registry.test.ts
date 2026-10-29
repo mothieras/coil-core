@@ -7,7 +7,7 @@ function definition(name: string): ToolDefinition {
   return {
     name,
     description: `${name} description`,
-    input_schema: {
+    parameters: {
       type: "object",
       properties: {},
     },
