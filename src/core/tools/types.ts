@@ -1,7 +1,7 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import type { Tool } from "@earendil-works/pi-ai";
 import type { ToolHandler } from "./input.js";
 
-export type ToolDefinition = Anthropic.Messages.Tool;
+export type ToolDefinition = Tool;
 
 export type ToolSource =
   { type: "builtin" } | { type: "mcp"; serverName: string; originalName: string };

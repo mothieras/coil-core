@@ -26,7 +26,7 @@ export function createWriteFileTool(deps: { workspaceRoot: string }): Registered
     {
       name: "write_file",
       description: "Write content to file.",
-      input_schema: {
+      parameters: {
         type: "object",
         properties: {
           path: { type: "string" },

@@ -10,7 +10,7 @@ export function createBackgroundRunTool(deps: {
       name: "background_run",
       description:
         "Run a shell command in the background. Returns task_id immediately; results arrive automatically as <background-results> messages.",
-      input_schema: {
+      parameters: {
         type: "object",
         properties: {
           command: { type: "string", description: "The shell command to run." },

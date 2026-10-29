@@ -28,7 +28,7 @@ export function createEditFileTool(deps: { workspaceRoot: string }): RegisteredT
     {
       name: "edit_file",
       description: "Replace exact text in file.",
-      input_schema: {
+      parameters: {
         type: "object",
         properties: {
           path: { type: "string" },

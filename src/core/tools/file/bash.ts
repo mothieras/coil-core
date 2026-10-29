@@ -55,7 +55,7 @@ export function createBashTool(deps: { workspaceRoot: string }): RegisteredTool 
     {
       name: "bash",
       description: "Run a shell command.",
-      input_schema: {
+      parameters: {
         type: "object",
         properties: {
           command: { type: "string" },

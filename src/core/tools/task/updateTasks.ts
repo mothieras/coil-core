@@ -9,7 +9,7 @@ export function createUpdateTasksTool(deps: { taskManager: TaskManager }): Regis
       name: "update_tasks",
       description:
         "Create and update the session task list in one call. Items without id are created; items with id are updated. Returns the resulting list. Tasks persist as JSON files and survive context compression.",
-      input_schema: {
+      parameters: {
         type: "object",
         properties: {
           tasks: {
