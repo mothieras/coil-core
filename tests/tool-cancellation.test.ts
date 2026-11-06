@@ -1,3 +1,4 @@
+import { testToolInvoker } from "./helpers/tools.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Agent } from "../src/core/agent/agent.js";
@@ -17,12 +18,12 @@ test("cancel a tool batch: retain prior results, skip later tools and continue w
   const agent = new Agent({
     toolRuntime: {
       getToolDefinitions: () => [],
-      invokeTool: async (name: string) => {
+      invokeTool: testToolInvoker(async (name: string) => {
         invocations++;
-        if (name === "prepared") return "kept result";
+        if (name === "prepared") return { status: "completed", output: await "kept result" };
         entered.resolve();
-        return result.promise;
-      },
+        return { status: "completed", output: await result.promise };
+      }),
     } as never,
     provider: fakeProvider(() =>
       ++modelCalls === 1
@@ -65,10 +66,10 @@ test("permission cancellation rejects a late allow without dispatch", async () =
   const agent = new Agent({
     toolRuntime: {
       getToolDefinitions: () => [],
-      invokeTool: async () => {
+      invokeTool: testToolInvoker(async () => {
         invoked++;
-        return "bad";
-      },
+        return { status: "completed", output: await "bad" };
+      }),
     } as never,
     provider: fakeProvider(() => toolCallMessage([toolCall("bash", {}, "permission")])),
     checkPermission: async () => {
@@ -97,10 +98,10 @@ test(
     const agent = new Agent({
       toolRuntime: {
         getToolDefinitions: () => [],
-        invokeTool: async () => {
+        invokeTool: testToolInvoker(async () => {
           entered.resolve();
-          return result.promise;
-        },
+          return { status: "completed", output: await result.promise };
+        }),
       } as never,
       provider: fakeProvider(() => toolCallMessage([toolCall("remote", {}, "remote")])),
     });
@@ -126,14 +127,17 @@ test("cooperative handler receives the signal and cancellation is a control outc
   const agent = new Agent({
     toolRuntime: {
       getToolDefinitions: () => [],
-      invokeTool: async (_name: string, _input: unknown, context: { signal: AbortSignal }) => {
+      invokeTool: testToolInvoker(async (_name, _input, context) => {
         entered.resolve();
-        return new Promise<string>((_resolve, reject) =>
-          context.signal.addEventListener("abort", () => reject(new ExecutionStoppedError()), {
-            once: true,
-          }),
-        );
-      },
+        return {
+          status: "completed",
+          output: await new Promise<string>((_resolve, reject) =>
+            context!.signal!.addEventListener("abort", () => reject(new ExecutionStoppedError()), {
+              once: true,
+            }),
+          ),
+        };
+      }),
     } as never,
     provider: fakeProvider(() => toolCallMessage([toolCall("wait", {}, "wait")])),
   });

@@ -138,6 +138,9 @@ function eventVisual(item: LogItemModel): EventVisual {
 
 function isExceptional(status: string | undefined): boolean {
   return (
+    status === "unavailable" ||
+    status === "invalid_input" ||
+    status === "not_executed" ||
     status === "error" ||
     status === "failed" ||
     status === "blocked" ||

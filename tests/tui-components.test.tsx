@@ -140,6 +140,18 @@ test("LogLine keeps conversation primary and tool traces scannable", () => {
   assert.match(tool, /✓ Read file.*src\/main\.ts.*42ms.*120 chars/s);
 });
 
+test("tool contract failures never render as success at 80 columns", () => {
+  for (const status of ["invalid_input", "unavailable", "not_executed"]) {
+    const frame = frameOf(
+      <LogLine width={80} item={{ id: status, kind: "tool", title: "read_file", status }} />,
+    );
+    assert.match(frame, /× Read file/);
+    assert.doesNotMatch(frame, /✓/);
+    assert.ok(frame.toLowerCase().includes(status.replaceAll("_", " ")));
+    assert.ok(frame.split("\n").every((line) => displayWidth(line) <= 80));
+  }
+});
+
 test("StatusBar prioritizes active work and fits terminal cell width", () => {
   const full = frameOf(<StatusBar snapshot={snap()} model="deepseek" />);
   for (const token of ["sess9", "deepseek", "↑14 ↓6", "ctx≈9/50k", "run t1", "mcp 1"])

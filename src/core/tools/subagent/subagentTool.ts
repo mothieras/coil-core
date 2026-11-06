@@ -1,4 +1,3 @@
-import { optionalArrayOfStrings, optionalInteger, requireNonEmptyString } from "../input.js";
 import type { SubagentStartOptions, StartSubagent } from "./types.js";
 import { builtinTool, type RegisteredTool } from "../types.js";
 
@@ -11,7 +10,11 @@ export function createSubagentTool(deps: { startSubagent: StartSubagent }): Regi
       parameters: {
         type: "object",
         properties: {
-          prompt: { type: "string", description: "The task for the subagent to complete." },
+          prompt: {
+            type: "string",
+            pattern: "\\S",
+            description: "The task for the subagent to complete.",
+          },
           name: { type: "string", description: "Optional display identity for the subagent." },
           role: { type: "string", description: "Optional role description for the subagent." },
           max_turns: {
@@ -40,23 +43,18 @@ export function createSubagentTool(deps: { startSubagent: StartSubagent }): Regi
       },
     },
     (input, context) => {
-      const prompt = requireNonEmptyString(input, "prompt", "subagent tool");
-      if ("error" in prompt) return prompt.error;
-
-      const options: SubagentStartOptions = {};
-      const name = requireNonEmptyString(input, "name", "subagent tool");
-      if (!("error" in name)) options.name = name.value;
-      const role = requireNonEmptyString(input, "role", "subagent tool");
-      if (!("error" in role)) options.role = role.value;
-      const taskId = requireNonEmptyString(input, "task_id", "subagent tool");
-      if (!("error" in taskId)) options.taskId = taskId.value;
-      const maxTurns = optionalInteger(input, "max_turns");
-      if (maxTurns !== undefined) options.maxTurns = maxTurns;
-      const timeoutMs = optionalInteger(input, "timeout_ms");
-      if (timeoutMs !== undefined) options.timeoutMs = timeoutMs;
-      const allowedTools = optionalArrayOfStrings(input, "allowed_tools");
-      if (allowedTools !== undefined) options.allowedTools = allowedTools;
-      return deps.startSubagent(prompt.value, options, context);
+      const options: SubagentStartOptions = {
+        name: input.name as string | undefined,
+        role: input.role as string | undefined,
+        taskId: input.task_id as string | undefined,
+        maxTurns: input.max_turns as number | undefined,
+        timeoutMs: input.timeout_ms as number | undefined,
+        allowedTools: input.allowed_tools as string[] | undefined,
+      };
+      return {
+        status: "completed",
+        output: deps.startSubagent(input.prompt as string, options, context),
+      };
     },
   );
 }

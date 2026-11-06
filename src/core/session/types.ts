@@ -8,7 +8,7 @@ import type {
   RunStopSource,
 } from "../agent/run.js";
 import type { RuntimeLifecycleEvent } from "../agent/lifecycle.js";
-import type { ToolSource } from "../tools/types.js";
+import type { ToolSource, ToolResultStatus } from "../tools/types.js";
 
 export type SessionStatus = "active" | "closed";
 
@@ -68,15 +68,7 @@ export type AgentRunProjection = {
   toolCallCount?: number | undefined;
 };
 
-export type ToolCallStatus =
-  | "running"
-  | "completed"
-  | "blocked"
-  | "permission_denied"
-  | "error"
-  | "cancelled"
-  | "timeout"
-  | "unconfirmed";
+export type ToolCallStatus = "running" | ToolResultStatus;
 
 export type ToolCallProjection = {
   id: string;
@@ -87,6 +79,8 @@ export type ToolCallProjection = {
   toolName: string;
   source?: ToolSource | undefined;
   status: ToolCallStatus;
+  dispatched?: boolean | undefined;
+  stopReason?: "aborted" | "timeout" | undefined;
   inputSummary?: string | undefined;
   resultSummary?: string | undefined;
   error?: string | undefined;

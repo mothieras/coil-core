@@ -7,7 +7,7 @@ import type {
   RunCleanupResult,
   RunStopSource,
 } from "./run.js";
-import type { ToolSource } from "../tools/types.js";
+import type { ToolSource, ToolResultStatus } from "../tools/types.js";
 
 export type RuntimeLifecycleEventType =
   | "agent_run_started"
@@ -81,14 +81,9 @@ export type ToolFinishedEvent = RuntimeLifecycleEventBase<"tool_finished"> & {
   toolCallId: string;
   toolName: string;
   source?: ToolSource | undefined;
-  status:
-    | "completed"
-    | "blocked"
-    | "permission_denied"
-    | "error"
-    | "cancelled"
-    | "timeout"
-    | "unconfirmed";
+  status: ToolResultStatus;
+  dispatched?: boolean | undefined;
+  stopReason?: "aborted" | "timeout" | undefined;
   resultSummary?: string | undefined;
   error?: string | undefined;
   durationMs?: number | undefined;

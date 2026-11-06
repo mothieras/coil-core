@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { formatError } from "../errors.js";
-import { requireString } from "../input.js";
-import { builtinTool, type RegisteredTool } from "../types.js";
+import { fileToolFailure } from "../errors.js";
+
+import { builtinTool, type RegisteredTool, type ToolExecutionResult } from "../types.js";
 import { safePath } from "./safePath.js";
 
 async function runEditFile(
@@ -9,17 +9,17 @@ async function runEditFile(
   oldText: string,
   newText: string,
   workspaceRoot: string,
-): Promise<string> {
+): Promise<ToolExecutionResult> {
   try {
     const filePath = await safePath(pathArg, workspaceRoot);
     const content = await readFile(filePath, "utf8");
     if (!content.includes(oldText)) {
-      return `Error: Text not found in ${pathArg}`;
+      return { status: "error", output: "Text not found in the target file." };
     }
     await writeFile(filePath, content.replace(oldText, newText), "utf8");
-    return `Edited ${pathArg}`;
+    return { status: "completed", output: `Edited ${pathArg}` };
   } catch (e) {
-    return formatError(e);
+    return fileToolFailure(e);
   }
 }
 
@@ -38,14 +38,12 @@ export function createEditFileTool(deps: { workspaceRoot: string }): RegisteredT
         required: ["path", "old_text", "new_text"],
       },
     },
-    (input) => {
-      const filepath = requireString(input, "path");
-      if (filepath === null) return "Error: Missing required 'path' for edit_file tool.";
-      const oldText = requireString(input, "old_text");
-      if (oldText === null) return "Error: Missing required 'old_text' for edit_file tool.";
-      const newText = requireString(input, "new_text");
-      if (newText === null) return "Error: Missing required 'new_text' for edit_file tool.";
-      return runEditFile(filepath, oldText, newText, deps.workspaceRoot);
-    },
+    (input) =>
+      runEditFile(
+        input.path as string,
+        input.old_text as string,
+        input.new_text as string,
+        deps.workspaceRoot,
+      ),
   );
 }

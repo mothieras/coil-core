@@ -1,3 +1,4 @@
+import { testToolInvoker } from "./helpers/tools.js";
 // tests/subagent-runner.test.ts
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -22,7 +23,10 @@ function okRuntime(): ToolRuntime {
     description: `${name} test tool`,
     parameters: { type: "object" as const, properties: {} },
   }));
-  return { getToolDefinitions: () => tools, invokeTool: async () => "" } as never;
+  return {
+    getToolDefinitions: () => tools,
+    invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
+  } as never;
 }
 
 function parentAgent(runtime: ToolRuntime, provider?: Provider): Agent {
@@ -104,7 +108,7 @@ test("cancelAll stops actual execution and suppresses cancelled results", async 
   await entered.promise;
   const stopped = runner.cancelAll();
   assert.equal(runner.hasRunning(), true);
-  assert.match(runner.run(parent, "too early"), /too many/);
+  assert.throws(() => runner.run(parent, "too early"), /Too many/);
   response.resolve(textMessage("late"));
   const results = await stopped;
   await waitUntilSettled(runner);
@@ -130,7 +134,7 @@ test("unconfirmed child retains capacity until its real provider settles", async
   const results = await runner.cancelAll(Date.now());
   assert.equal(results[0]?.cleanup?.status, "unconfirmed");
   assert.equal(runner.hasRunning(), true);
-  assert.match(runner.run(parent, "blocked"), /too many/);
+  assert.throws(() => runner.run(parent, "blocked"), /Too many/);
   response.resolve(textMessage("late"));
   await waitUntilSettled(runner);
   assert.equal(runner.hasRunning(), false);
@@ -178,10 +182,10 @@ test("each subagent runs under its own identity, never 'lead' (observed via tool
         description: `${name} test tool`,
         parameters: { type: "object" as const, properties: {} },
       })),
-    invokeTool: async () => {
+    invokeTool: testToolInvoker(async () => {
       observed = currentAgent.getStore()?.id;
-      return "";
-    },
+      return { status: "completed", output: await "" };
+    }),
   } as never;
 
   const runner = new SubAgentRunner();
@@ -198,7 +202,7 @@ test("a rejecting subagent settles as error and never crashes the process", asyn
     getToolDefinitions: () => {
       throw new Error("boom");
     },
-    invokeTool: async () => "",
+    invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
   } as never;
   const inbox = new AsyncWorkInbox();
   const runner = new SubAgentRunner(undefined, undefined, inbox);
@@ -221,9 +225,8 @@ test("run() refuses to exceed the concurrency cap", async () => {
     fakeProvider(() => textMessage("done")),
   );
   const first = runner.run(parent, "a");
-  const second = runner.run(parent, "b");
   assert.match(first, /started/);
-  assert.match(second, /Error: too many running subagents/);
+  assert.throws(() => runner.run(parent, "b"), /Too many running subagents/);
   await waitUntilSettled(runner);
 });
 

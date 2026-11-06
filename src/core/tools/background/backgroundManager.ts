@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { ToolExecutionError } from "../errors.js";
 import { isDangerousCommand } from "../file/shellSafety.js";
 import { startManagedProcess, type ManagedProcess } from "../file/process.js";
 import { ExecutionStoppedError, throwIfAborted } from "../../loop/cancellation.js";
@@ -36,7 +37,8 @@ export class BackgroundManager {
 
   run(command: string, context?: ToolInvocationContext): string {
     throwIfAborted(context?.signal);
-    if (isDangerousCommand(command)) return "Error: Dangerous command blocked";
+    if (isDangerousCommand(command))
+      throw new ToolExecutionError("Dangerous command blocked", { status: "blocked" });
     const id = crypto.randomUUID().slice(0, 8);
     const record: BackgroundCommandRecord = {
       id,

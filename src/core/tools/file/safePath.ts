@@ -1,5 +1,6 @@
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { ToolExecutionError } from "../errors.js";
 
 async function nearestExistingPath(targetPath: string): Promise<string> {
   let current = targetPath;
@@ -31,11 +32,11 @@ export async function safePath(inputPath: string, workspaceRoot: string): Promis
   const realExistingPath = await realpath(existingPath);
 
   if (!isInsideWorkspace(workdir, realExistingPath)) {
-    throw new Error(`Path escapes workspace: ${inputPath}`);
+    throw new ToolExecutionError("Path escapes workspace.");
   }
 
   if (!isInsideWorkspace(workdir, resolvedPath)) {
-    throw new Error(`Path escapes workspace: ${inputPath}`);
+    throw new ToolExecutionError("Path escapes workspace.");
   }
 
   return resolvedPath;

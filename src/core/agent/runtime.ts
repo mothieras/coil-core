@@ -229,8 +229,16 @@ export class AgentRuntime {
         }
         result = { stopReason: run.stopReason === "timeout" ? "timeout" : "aborted", content: [] };
       }
-      if (result.stopReason === "timeout" && !scope.signal.aborted) {
-        this.requestStop(control, "timeout", "deadline", Date.now() + CLEANUP_TIMEOUT_MS);
+      if (
+        (result.stopReason === "timeout" || result.stopReason === "aborted") &&
+        !scope.signal.aborted
+      ) {
+        this.requestStop(
+          control,
+          result.stopReason,
+          result.stopReason === "timeout" ? "deadline" : "user",
+          Date.now() + CLEANUP_TIMEOUT_MS,
+        );
       }
       if (scope.signal.aborted) {
         const deadline = control.deadlineAt ?? Date.now() + CLEANUP_TIMEOUT_MS;

@@ -46,13 +46,12 @@ import {
   type ToolStartedEvent,
 } from "../agent/lifecycle.js";
 import {
-  isToolErrorOutput,
-  summarizeLifecycleError,
   summarizeLifecycleText,
   summarizeToolInput,
   summarizeToolResult,
 } from "../agent/lifecycleSummary.js";
-import type { ToolSource } from "../tools/types.js";
+import type { ToolSource, ToolExecutionResult } from "../tools/types.js";
+import { ToolInvocationError, redactToolDiagnostic } from "../tools/errors.js";
 import {
   decideRecovery,
   initialRecoveryState,
@@ -159,7 +158,12 @@ function emitToolFinished(
   block: ToolCall,
   source: ToolSource | undefined,
   fields: Pick<ToolFinishedEvent, "status"> &
-    Partial<Pick<ToolFinishedEvent, "resultSummary" | "error" | "durationMs">>,
+    Partial<
+      Pick<
+        ToolFinishedEvent,
+        "resultSummary" | "error" | "durationMs" | "dispatched" | "stopReason"
+      >
+    >,
 ): void {
   if (!options.runContext) return;
   safeEmitRuntimeLifecycle(
@@ -171,6 +175,8 @@ function emitToolFinished(
       toolName: block.name,
       ...(source !== undefined ? { source } : {}),
       status: fields.status,
+      dispatched: fields.dispatched,
+      stopReason: fields.stopReason,
       ...(fields.resultSummary !== undefined ? { resultSummary: fields.resultSummary } : {}),
       ...(fields.error !== undefined ? { error: fields.error } : {}),
       ...(fields.durationMs !== undefined ? { durationMs: fields.durationMs } : {}),
@@ -178,208 +184,193 @@ function emitToolFinished(
   );
 }
 
-type ToolUseExecutionResult =
-  { kind: "result"; result: ToolResultMessage } | { kind: "timeout"; result: AgentLoopResult };
-
 type ToolUseExecutionOptions = {
   agent: Agent;
   block: ToolCall;
-  deadlineAt: number | undefined;
   loopOptions: AgentLoopOptions;
-  timedOut: () => AgentLoopResult;
+  results: ToolResultMessage[];
 };
 
-function toolResult(block: ToolCall, content: string, isError: boolean): ToolResultMessage {
+function toolResult(
+  block: ToolCall,
+  result: ToolExecutionResult,
+  dispatched: boolean,
+): ToolResultMessage {
   return {
     role: "toolResult",
     toolCallId: block.id,
     toolName: block.name,
-    content: [{ type: "text", text: content }],
-    isError,
+    content: [
+      {
+        type: "text",
+        text: result.status === "completed" ? result.output : redactToolDiagnostic(result.output),
+      },
+    ],
+    isError: result.status !== "completed",
+    details: {
+      status: result.status,
+      dispatched,
+      ...(result.stopReason ? { stopReason: result.stopReason } : {}),
+    },
     timestamp: Date.now(),
   };
 }
 
-async function executeToolUseBlock(
-  options: ToolUseExecutionOptions,
-): Promise<ToolUseExecutionResult> {
-  const { agent, block, deadlineAt, loopOptions, timedOut } = options;
+async function executeToolUseBlock(options: ToolUseExecutionOptions): Promise<void> {
+  const { agent, block, loopOptions, results } = options;
   const hooks = agent.hooks;
   const checkPermission = agent.checkPermission;
   const toolRuntime = agent.toolRuntime;
   const source = getToolSource(agent, block.name);
-  const toolStartedAt = Date.now();
-  let finished = false;
-  const durationMs = () => Date.now() - toolStartedAt;
-  const finish = (
-    fields: Pick<ToolFinishedEvent, "status"> &
-      Partial<Pick<ToolFinishedEvent, "resultSummary" | "error">>,
-  ) => {
-    if (finished) return;
-    finished = true;
+  const startedAt = Date.now();
+  let dispatched = false;
+  const finish = (result: ToolExecutionResult) => {
+    results.push(toolResult(block, result, dispatched));
     emitToolFinished(loopOptions, block, source, {
-      ...fields,
-      durationMs: durationMs(),
+      status: result.status,
+      dispatched,
+      stopReason: result.stopReason,
+      durationMs: Date.now() - startedAt,
+      resultSummary: summarizeToolResult(result.output),
+      ...(result.status !== "completed" ? { error: summarizeLifecycleText(result.output) } : {}),
     });
   };
 
   emitToolStarted(loopOptions, block, source);
-
   try {
-    const allowedTools = agent.allowedTools;
-    if (allowedTools !== undefined && !allowedTools.includes(block.name)) {
-      const notAllowed = `Error: Tool '${block.name}' is not allowed for this agent.`;
-      finish({
-        status: "blocked",
-        resultSummary: summarizeLifecycleText(notAllowed),
-      });
-      return { kind: "result", result: toolResult(block, notAllowed, true) };
+    throwIfAborted(loopOptions.signal);
+    if (agent.allowedTools !== undefined && !agent.allowedTools.includes(block.name)) {
+      finish({ status: "blocked", output: `Tool '${block.name}' is not allowed for this agent.` });
+      return;
     }
-
-    // Tool execution gating: PreToolUse hooks run first (can block entirely,
-    // skipping permission), then the optional permission pipeline (deny list →
-    // rule matching → user approval). A PreToolUse hook that blocks bypasses
-    // permission — useful for administrative blocks, not user prompts.
     const blocked = hooks?.triggerControl("PreToolUse", block);
     if (blocked) {
-      finish({
-        status: "blocked",
-        resultSummary: summarizeLifecycleText(blocked),
-      });
-      return { kind: "result", result: toolResult(block, blocked, true) };
+      finish({ status: "blocked", output: blocked });
+      return;
     }
-
-    if (checkPermission) {
-      const permissionId = crypto.randomUUID();
-      const input = block.arguments as Record<string, unknown>;
-      const inputSummary = summarizeToolInput(block.name, block.arguments);
-      const runContext = loopOptions.runContext ?? {
-        runId: "untracked",
-        agentId: agent.id ?? "lead",
-        agentKind: "lead" as const,
-      };
-      const emitPermissionRequested = (reason: string) => {
-        if (!loopOptions.runContext) return;
-        safeEmitRuntimeLifecycle(
-          loopOptions.lifecycle,
-          createRuntimeLifecycleEvent<PermissionRequestedEvent>({
-            ...runtimeLifecycleBase(loopOptions.runContext),
-            type: "permission_requested",
-            permissionId,
-            toolCallId: block.id,
-            toolName: block.name,
-            ...(source !== undefined ? { source } : {}),
-            reason: summarizeLifecycleText(reason),
-            inputSummary,
-          }),
-        );
-      };
-      const permissionContext: PermissionCheckContext = {
-        signal: loopOptions.signal,
-        permissionId,
-        toolName: block.name,
-        input,
-        runId: runContext.runId,
-        agentId: runContext.agentId,
-        agentKind: runContext.agentKind,
-        toolCallId: block.id,
-        ...(runContext.sessionId !== undefined ? { sessionId: runContext.sessionId } : {}),
-        ...(source !== undefined ? { source } : {}),
-        inputSummary,
-        emitPermissionRequested,
-      };
-      throwIfAborted(loopOptions.signal);
-      const permResult = await waitForOperation(
-        checkPermission(permissionContext),
-        loopOptions,
-        `permission:${block.id}`,
-      );
-      if (loopOptions.runContext && (!permResult.allowed || permResult.requested)) {
-        safeEmitRuntimeLifecycle(
-          loopOptions.lifecycle,
-          createRuntimeLifecycleEvent<PermissionResolvedEvent>({
-            ...runtimeLifecycleBase(loopOptions.runContext),
-            type: "permission_resolved",
-            permissionId,
-            toolCallId: block.id,
-            toolName: block.name,
-            ...(source !== undefined ? { source } : {}),
-            allowed: permResult.allowed,
-            ...(permResult.reason !== undefined
-              ? { reason: summarizeLifecycleText(permResult.reason) }
-              : {}),
-          }),
-        );
-      }
-      if (!permResult.allowed) {
-        const deniedResult = `Permission denied: ${
-          permResult.reason ?? "blocked by permission check"
-        }`;
-        finish({
-          status: "permission_denied",
-          resultSummary: summarizeLifecycleText(deniedResult),
-        });
-        return { kind: "result", result: toolResult(block, deniedResult, true) };
-      }
-    }
-
-    let output: string;
-    let invokeError: string | undefined;
-    try {
-      throwIfAborted(loopOptions.signal);
-      output = await waitForOperation(
-        toolRuntime.invokeTool(block.name, block.arguments, {
-          toolCallId: block.id,
-          toolName: block.name,
+    const beforeInvoke = async (
+      validated: Record<string, unknown>,
+    ): Promise<ToolExecutionResult | void> => {
+      if (checkPermission) {
+        const permissionId = crypto.randomUUID();
+        const input = validated;
+        const inputSummary = summarizeToolInput(block.name, block.arguments);
+        const runContext = loopOptions.runContext ?? {
+          runId: "untracked",
+          agentId: agent.id ?? "lead",
+          agentKind: "lead" as const,
+        };
+        const emitPermissionRequested = (reason: string) => {
+          if (!loopOptions.runContext) return;
+          safeEmitRuntimeLifecycle(
+            loopOptions.lifecycle,
+            createRuntimeLifecycleEvent<PermissionRequestedEvent>({
+              ...runtimeLifecycleBase(loopOptions.runContext),
+              type: "permission_requested",
+              permissionId,
+              toolCallId: block.id,
+              toolName: block.name,
+              ...(source !== undefined ? { source } : {}),
+              reason: summarizeLifecycleText(reason),
+              inputSummary,
+            }),
+          );
+        };
+        const permissionContext: PermissionCheckContext = {
           signal: loopOptions.signal,
-          ...(loopOptions.runContext !== undefined
-            ? {
-                runId: loopOptions.runContext.runId,
-                sessionId: loopOptions.runContext.sessionId,
-                agentId: loopOptions.runContext.agentId,
-                agentKind: loopOptions.runContext.agentKind,
-              }
-            : {}),
+          permissionId,
+          toolName: block.name,
+          input,
+          runId: runContext.runId,
+          agentId: runContext.agentId,
+          agentKind: runContext.agentKind,
+          toolCallId: block.id,
+          ...(runContext.sessionId !== undefined ? { sessionId: runContext.sessionId } : {}),
           ...(source !== undefined ? { source } : {}),
-        }),
-        loopOptions,
-        `tool:${block.id}`,
-      );
-    } catch (error) {
-      if (error instanceof ExecutionStoppedError) throw error;
-      if (isDeadlineError(error, deadlineAt)) throw error;
-      invokeError = summarizeLifecycleError(error);
-      output = `Error: ${formatRuntimeError(error)}`;
-    }
-
-    hooks?.emitEffect("PostToolUse", block, output);
-    const isError = invokeError !== undefined || isToolErrorOutput(output);
-    finish({
-      status: isError ? "error" : "completed",
-      resultSummary: summarizeToolResult(output),
-      ...(isError ? { error: invokeError ?? summarizeLifecycleText(output) } : {}),
-    });
-    return { kind: "result", result: toolResult(block, output, isError) };
+          inputSummary,
+          emitPermissionRequested,
+        };
+        throwIfAborted(loopOptions.signal);
+        const permResult = await waitForOperation(
+          checkPermission(permissionContext),
+          loopOptions,
+          `permission:${block.id}`,
+        );
+        if (loopOptions.runContext && (!permResult.allowed || permResult.requested)) {
+          safeEmitRuntimeLifecycle(
+            loopOptions.lifecycle,
+            createRuntimeLifecycleEvent<PermissionResolvedEvent>({
+              ...runtimeLifecycleBase(loopOptions.runContext),
+              type: "permission_resolved",
+              permissionId,
+              toolCallId: block.id,
+              toolName: block.name,
+              ...(source !== undefined ? { source } : {}),
+              allowed: permResult.allowed,
+              ...(permResult.reason !== undefined
+                ? { reason: summarizeLifecycleText(permResult.reason) }
+                : {}),
+            }),
+          );
+        }
+        if (!permResult.allowed) {
+          const deniedResult = `Permission denied: ${
+            permResult.reason ?? "blocked by permission check"
+          }`;
+          return { status: "permission_denied", output: deniedResult };
+        }
+      }
+    };
+    const result = await waitForOperation(
+      toolRuntime.invokeTool(block.name, block.arguments, {
+        toolCallId: block.id,
+        toolName: block.name,
+        signal: loopOptions.signal,
+        argumentsError: block.argumentsError,
+        beforeInvoke,
+        onDispatch: () => {
+          dispatched = true;
+        },
+        ...(loopOptions.runContext ?? {}),
+        ...(source !== undefined ? { source } : {}),
+      }),
+      loopOptions,
+      `tool:${block.id}`,
+    );
+    if (dispatched) hooks?.emitEffect("PostToolUse", block, result.output);
+    finish(result);
   } catch (error) {
-    finish({
-      status:
-        error instanceof ExecutionStoppedError
-          ? error.resource?.startsWith("tool:") && error.confirmation === "unconfirmed"
-            ? "unconfirmed"
-            : error.reason === "timeout"
-              ? "timeout"
-              : "cancelled"
-          : "error",
-      error:
-        error instanceof ExecutionStoppedError && error.resource?.startsWith("permission:")
-          ? "Not executed: permission wait cancelled."
-          : summarizeLifecycleError(error),
-    });
-    if (error instanceof ExecutionStoppedError) throw error;
-    if (isDeadlineError(error, deadlineAt)) {
-      return { kind: "timeout", result: timedOut() };
+    if (error instanceof ExecutionStoppedError) {
+      const status = !dispatched
+        ? error.reason === "timeout"
+          ? "timeout"
+          : "cancelled"
+        : error.confirmation === "unconfirmed"
+          ? "unconfirmed"
+          : error.reason === "timeout"
+            ? "timeout"
+            : "cancelled";
+      finish({
+        status,
+        stopReason: error.reason,
+        output: !dispatched
+          ? "未执行：运行已停止。"
+          : status === "unconfirmed"
+            ? "结果未知：运行已停止等待，工具可能仍在执行。"
+            : `工具已停止：${error.reason}。`,
+      });
+      throw error;
     }
-    throw error;
+    const fatal =
+      error instanceof ToolInvocationError
+        ? error
+        : new ToolInvocationError(
+            block.name,
+            { toolName: block.name, toolCallId: block.id, runId: loopOptions.runContext?.runId },
+            error,
+          );
+    finish({ status: "error", output: fatal.message });
+    throw fatal;
   }
 }
 
@@ -418,6 +409,12 @@ export async function agentLoop(
     const result = await currentAgent.run(agent, () =>
       agentLoopInner(agent, { ...options, signal: scope.signal, scope }),
     );
+    if (
+      ownsScope &&
+      !scope.signal.aborted &&
+      (result.stopReason === "aborted" || result.stopReason === "timeout")
+    )
+      scope.controller.abort(new ExecutionStoppedError(result.stopReason));
     if (ownsScope && scope.signal.aborted) {
       result.stopReason =
         scope.signal.reason instanceof ExecutionStoppedError
@@ -634,34 +631,25 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
         for (const block of calls) {
           throwIfAborted(options.signal);
           throwIfDeadlineExpired(deadlineAt);
-          const execution = await executeToolUseBlock({
-            agent,
-            block,
-            deadlineAt,
-            loopOptions: options,
-            timedOut,
-          });
-          if (execution.kind === "timeout")
-            throw new ExecutionStoppedError("timeout", `tool:${block.id}`);
-          results.push(execution.result);
+          await executeToolUseBlock({ agent, block, loopOptions: options, results });
         }
       } catch (error) {
-        if (error instanceof ExecutionStoppedError || isDeadlineError(error, deadlineAt)) {
-          for (const block of calls.slice(results.length)) {
-            const dispatched =
-              error instanceof ExecutionStoppedError && error.resource === `tool:${block.id}`;
-            results.push(
-              toolResult(
-                block,
-                dispatched
-                  ? "结果未知：运行已停止等待，工具可能仍在执行。"
-                  : "未执行：运行已取消。",
-                true,
-              ),
-            );
-          }
-          messages.push(...results);
+        for (const block of calls.slice(results.length)) {
+          const result: ToolExecutionResult = {
+            status: "not_executed",
+            output: "未执行：本批次已停止。",
+          };
+          const source = getToolSource(agent, block.name);
+          emitToolStarted(options, block, source);
+          emitToolFinished(options, block, source, {
+            status: result.status,
+            dispatched: false,
+            error: result.output,
+            durationMs: 0,
+          });
+          results.push(toolResult(block, result, false));
         }
+        messages.push(...results);
         throw error;
       }
 

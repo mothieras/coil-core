@@ -1,3 +1,4 @@
+import { testToolInvoker } from "./helpers/tools.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -10,7 +11,10 @@ import { createRuntimeLifecycleCollector } from "../src/core/agent/lifecycle.js"
 import { createPermissionBridge } from "../src/tui/permissionBridge.js";
 import { fakeProvider, textMessage, userMessage } from "./helpers/pi.js";
 
-const emptyRuntime = { getToolDefinitions: () => [], invokeTool: async () => "" } as never;
+const emptyRuntime = {
+  getToolDefinitions: () => [],
+  invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
+} as never;
 const record = () =>
   createAgentRun({ agentId: "lead", agentKind: "lead", trigger: { type: "user_message" } });
 

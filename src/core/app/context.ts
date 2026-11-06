@@ -1,4 +1,5 @@
 import path from "node:path";
+import { ToolExecutionError } from "../tools/errors.js";
 import { HookBus } from "../hooks/hookBus.js";
 import { MemoryManager } from "../services/memory/memoryManager.js";
 import type { CheckPermissionFn } from "../permission/types.js";
@@ -68,7 +69,8 @@ export function createAppContext(
     startSubagent: (prompt, subOptions, context) => {
       throwIfAborted(context?.signal);
       const parent = currentAgent.getStore();
-      if (!parent) return "Error: subagent can only be spawned from within an agent loop.";
+      if (!parent)
+        throw new ToolExecutionError("subagent can only be spawned from within an agent loop.");
       return subAgentRunner.run(parent, prompt, {
         ...subOptions,
         sessionId: context?.sessionId,

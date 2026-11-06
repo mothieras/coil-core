@@ -1,4 +1,5 @@
-import { throwIfAborted } from "../../loop/cancellation.js";
+import { ExecutionStoppedError, throwIfAborted } from "../../loop/cancellation.js";
+import { ToolExecutionError } from "../errors.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { McpServerConfig } from "./config.js";
 import type { McpClient, McpToolResult, McpToolSchema } from "./types.js";
@@ -73,7 +74,8 @@ export class JsonRpcStream {
     const resolver = this.pending.get(response.id);
     if (!resolver) return; // already settled (e.g. timed out) or unknown id
     this.pending.delete(response.id);
-    if (response.error) resolver.reject(new Error(response.error.message ?? "MCP error"));
+    if (response.error)
+      resolver.reject(new ToolExecutionError(response.error.message ?? "MCP error"));
     else resolver.resolve(response.result);
   }
 }
@@ -172,7 +174,7 @@ export class StdioMcpClient implements McpClient {
     return new Promise<unknown>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.stream.delete(id);
-        reject(new Error(`MCP request ${id} timed out.`));
+        reject(new ExecutionStoppedError("timeout", `mcp-request:${id}`, "unconfirmed"));
       }, REQUEST_TIMEOUT_MS);
       this.stream.add(id, {
         resolve: (value) => {

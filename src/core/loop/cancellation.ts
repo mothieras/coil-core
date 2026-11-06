@@ -81,9 +81,10 @@ export class ExecutionScope {
       (error: unknown) => {
         this.pending.delete(promise);
         if (
-          this.signal.aborted &&
-          (!(error instanceof ExecutionStoppedError) || error.confirmation === "unconfirmed") &&
-          !(error instanceof Error && error.name === "AbortError")
+          (error instanceof ExecutionStoppedError && error.confirmation === "unconfirmed") ||
+          (this.signal.aborted &&
+            !(error instanceof ExecutionStoppedError) &&
+            !(error instanceof Error && error.name === "AbortError"))
         ) {
           this.errors.push(`${resource}: ${String(error)}`);
         }

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { ToolExecutionError } from "../errors.js";
 
 export interface TaskRecord {
   id: number;
@@ -45,10 +46,13 @@ export class TaskManager {
 
   private load(taskId: number): TaskRecord {
     const filePath = path.join(this.dir, `task_${taskId}.json`);
-    if (!existsSync(filePath)) {
-      throw new Error(`Task ${taskId} not found`);
+    try {
+      return JSON.parse(readFileSync(filePath, "utf8")) as TaskRecord;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT")
+        throw new ToolExecutionError(`Task ${taskId} not found`, { cause: error });
+      throw error;
     }
-    return JSON.parse(readFileSync(filePath, "utf8")) as TaskRecord;
   }
 
   private save(task: TaskRecord): void {
@@ -80,7 +84,7 @@ export class TaskManager {
 
     if (status) {
       if (!["pending", "in_progress", "completed"].includes(status)) {
-        throw new Error(`Invalid status: ${status}`);
+        throw new ToolExecutionError("Invalid task status");
       }
       task.status = status as TaskRecord["status"];
       if (status === "completed") {
@@ -109,7 +113,7 @@ export class TaskManager {
     for (const item of items) {
       if (item.id === undefined) {
         if (!item.subject || item.subject.trim() === "") {
-          throw new Error("Each new task needs a non-empty 'subject'");
+          throw new ToolExecutionError("Each new task needs a non-empty 'subject'");
         }
         const created = JSON.parse(this.create(item.subject, item.description ?? "")) as TaskRecord;
         if (item.status && item.status !== "pending") {
@@ -123,12 +127,7 @@ export class TaskManager {
   }
 
   private clearDependency(completedId: number): void {
-    let entries: string[];
-    try {
-      entries = readdirSync(this.dir);
-    } catch {
-      return;
-    }
+    const entries = readdirSync(this.dir);
     for (const f of entries) {
       if (!f.startsWith("task_") || !f.endsWith(".json")) continue;
       const filePath = path.join(this.dir, f);
@@ -141,12 +140,7 @@ export class TaskManager {
   }
 
   hasActive(): boolean {
-    let entries: string[];
-    try {
-      entries = readdirSync(this.dir);
-    } catch {
-      return false;
-    }
+    const entries = readdirSync(this.dir);
     for (const f of entries) {
       if (!f.startsWith("task_") || !f.endsWith(".json")) continue;
       const task = JSON.parse(readFileSync(path.join(this.dir, f), "utf8")) as TaskRecord;
@@ -159,12 +153,7 @@ export class TaskManager {
 
   listAll(): string {
     const tasks: TaskRecord[] = [];
-    let entries: string[];
-    try {
-      entries = readdirSync(this.dir);
-    } catch {
-      return "No tasks.";
-    }
+    const entries = readdirSync(this.dir);
 
     const files = entries
       .filter((f) => /^task_\d+\.json$/.test(f))
@@ -198,12 +187,7 @@ export class TaskManager {
   }
 
   clearIfAllCompleted(): boolean {
-    let entries: string[];
-    try {
-      entries = readdirSync(this.dir);
-    } catch {
-      return false;
-    }
+    const entries = readdirSync(this.dir);
     const taskFiles = entries.filter((f) => f.startsWith("task_") && f.endsWith(".json"));
     if (taskFiles.length === 0) return false;
 

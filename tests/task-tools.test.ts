@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { TaskManager } from "../src/core/tools/task/taskManager.js";
 import { createTaskTools } from "../src/core/tools/task/index.js";
+import { ToolRegistry } from "../src/core/tools/registry.js";
+import { ToolRuntime } from "../src/core/tools/runtime.js";
+import { BackgroundManager } from "../src/core/tools/background/backgroundManager.js";
 
 test("applyMany creates, updates and returns the resulting list", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "coil-tasks-"));
@@ -32,10 +35,26 @@ test("update_tasks tool validates input and applies the list", async () => {
     assert.equal(tools.length, 1);
     const tool = tools[0]!;
     assert.equal(tool.name, "update_tasks");
-    const bad = await tool.handler({});
-    assert.match(String(bad), /'tasks' must be a non-empty array/);
-    const ok = await tool.handler({ tasks: [{ subject: "demo" }] });
-    assert.match(String(ok), /#1: demo/);
+    const registry = new ToolRegistry();
+    registry.registerMany(tools);
+    const runtime = new ToolRuntime({
+      registry,
+      taskManager: manager,
+      backgroundManager: new BackgroundManager(dir),
+    });
+    for (const input of [
+      {},
+      { tasks: [] },
+      { tasks: [{ subject: "must not write" }, {}] },
+      { tasks: [{ subject: "demo", status: "wrong" }] },
+    ]) {
+      const bad = await runtime.invokeTool("update_tasks", input);
+      assert.equal(bad.status, "invalid_input");
+      assert.equal(manager.listAll(), "No tasks.");
+    }
+    const ok = await runtime.invokeTool("update_tasks", { tasks: [{ subject: "demo" }] });
+    assert.equal(ok.status, "completed");
+    assert.match(ok.output, /#1: demo/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

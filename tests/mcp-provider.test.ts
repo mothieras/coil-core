@@ -75,7 +75,7 @@ test("MCP registered tool invokes the client with the original MCP tool name", a
       handlers: {
         search_issues: async () => ({
           content: [
-            { type: "text", text: "Found 2 issues." },
+            { type: "text", text: "Error: Found 2 issues." },
             { type: "json", json: { ids: [1, 2] } },
           ],
         }),
@@ -96,7 +96,8 @@ test("MCP registered tool invokes the client with the original MCP tool name", a
     });
 
     assert.deepEqual(client.calls, [{ name: "search_issues", input: { query: "is:open" } }]);
-    assert.equal(output, 'Found 2 issues.\n{\n  "ids": [\n    1,\n    2\n  ]\n}');
+    assert.equal(output.status, "completed");
+    assert.equal(output.output, 'Error: Found 2 issues.\n{\n  "ids": [\n    1,\n    2\n  ]\n}');
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -129,10 +130,10 @@ test("MCP tool results preserve isError as tool error output", async () => {
       registry,
     });
 
-    assert.equal(
-      await runtime.invokeTool("mcp__demo__fail", {}),
-      "Error: MCP tool returned error.\nremote tool failed",
-    );
+    assert.deepEqual(await runtime.invokeTool("mcp__demo__fail", {}), {
+      status: "error",
+      output: "remote tool failed",
+    });
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -178,7 +179,10 @@ test("app context can register preloaded mock MCP provider results", async () =>
       toolProviderResults: [mcp],
     });
 
-    assert.equal(await app.toolRuntime.invokeTool("mcp__mock__ping", {}), "pong");
+    assert.deepEqual(await app.toolRuntime.invokeTool("mcp__mock__ping", {}), {
+      status: "completed",
+      output: "pong",
+    });
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

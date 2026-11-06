@@ -1,3 +1,4 @@
+import { testToolInvoker } from "./helpers/tools.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -15,7 +16,7 @@ import { hasPendingAsyncWork } from "../src/core/app/pendingWork.js";
 import { PROMPT_SECTIONS } from "../src/core/context/sections.js";
 import { BackgroundManager } from "../src/core/tools/background/backgroundManager.js";
 import type { BackgroundCommandRecord } from "../src/core/tools/background/backgroundManager.js";
-import { requireNonEmptyString } from "../src/core/tools/input.js";
+import { ToolInvocationError } from "../src/core/tools/errors.js";
 import { ToolRegistry } from "../src/core/tools/registry.js";
 import { ToolRuntime } from "../src/core/tools/runtime.js";
 import { TaskManager } from "../src/core/tools/task/taskManager.js";
@@ -146,7 +147,7 @@ test("loadBuiltinTools returns complete RegisteredTool entries", async () => {
 
 test("tool profile validation reports unknown allowed tools", () => {
   const registry = new ToolRegistry();
-  registry.register(testTool("read_file", () => "ok"));
+  registry.register(testTool("read_file", () => ({ status: "completed", output: "ok" })));
 
   assert.throws(
     () =>
@@ -159,7 +160,7 @@ test("tool profile validation reports unknown allowed tools", () => {
 
 test("registry.getDefinitions fails fast on an unknown allowed tool", () => {
   const registry = new ToolRegistry();
-  registry.register(testTool("read_file", () => "ok"));
+  registry.register(testTool("read_file", () => ({ status: "completed", output: "ok" })));
 
   assert.throws(
     () => registry.getDefinitions(["read_file", "nope"]),
@@ -173,7 +174,8 @@ test("subagent tool errors when invoked outside an agent loop", async () => {
     const app = createAppContext(workspace);
     // No surrounding currentAgent.run → no parent in the async context.
     const out = await app.toolRuntime.invokeTool("subagent", { prompt: "x" });
-    assert.match(String(out), /within an agent loop/);
+    assert.equal(out.status, "error");
+    assert.match(out.output, /within an agent loop/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -291,7 +293,8 @@ test("ToolRuntime resolves file tools against its workspace root", async () => {
       content: "workspace-root",
     });
 
-    assert.match(output, /Wrote 14 bytes/);
+    assert.equal(output.status, "completed");
+    assert.match(output.output, /Wrote 14 bytes/);
     assert.equal(
       await readFile(path.join(workspace, "nested/example.txt"), "utf8"),
       "workspace-root",
@@ -302,7 +305,7 @@ test("ToolRuntime resolves file tools against its workspace root", async () => {
   }
 });
 
-test("ToolRuntime returns handler exceptions as error strings", async () => {
+test("ToolRuntime preserves unexpected handler exceptions as fatal causes", async () => {
   const registry = new ToolRegistry();
   const runtime = new ToolRuntime({
     taskManager: new TaskManager(taskStatePath(process.cwd())),
@@ -321,8 +324,13 @@ test("ToolRuntime returns handler exceptions as error strings", async () => {
     }),
   );
 
-  assert.match(await runtime.invokeTool("explode", {}), /Error: boom/);
-  assert.match(await runtime.invokeTool("reject", {}), /Error: async boom/);
+  for (const name of ["explode", "reject"]) {
+    await assert.rejects(runtime.invokeTool(name, {}), (error) => {
+      assert.ok(error instanceof ToolInvocationError);
+      assert.match(String(error.cause), /boom/);
+      return true;
+    });
+  }
 });
 
 test("ToolRuntime passes invocation context to handlers", async () => {
@@ -338,7 +346,7 @@ test("ToolRuntime passes invocation context to handlers", async () => {
     source: { type: "builtin" },
     handler: (_input, context) => {
       observedToolCallId = context?.toolCallId;
-      return "ok";
+      return { status: "completed", output: "ok" };
     },
   });
   const runtime = new ToolRuntime({
@@ -364,7 +372,7 @@ test("ToolRuntime exposes registered tool source metadata", () => {
     registry,
   });
 
-  runtime.registerTool(testTool("source_test", () => "ok"));
+  runtime.registerTool(testTool("source_test", () => ({ status: "completed", output: "ok" })));
 
   assert.deepEqual(runtime.getToolSource("source_test"), { type: "builtin" });
   assert.equal(runtime.getToolSource("missing_tool"), undefined);
@@ -373,10 +381,10 @@ test("ToolRuntime exposes registered tool source metadata", () => {
 test("ToolRuntime returns unsupported for unknown tools", async () => {
   const runtime = createRuntime(process.cwd());
 
-  assert.equal(
-    await runtime.invokeTool("missing_tool", {}),
-    "Error: Unsupported tool 'missing_tool'.",
-  );
+  assert.deepEqual(await runtime.invokeTool("missing_tool", {}), {
+    status: "unavailable",
+    output: "Unsupported tool 'missing_tool'.",
+  });
 });
 
 test("ToolRuntime returns unavailable for failed provider namespaces", async () => {
@@ -394,10 +402,10 @@ test("ToolRuntime returns unavailable for failed provider namespaces", async () 
     registry,
   });
 
-  assert.equal(
-    await runtime.invokeTool("mcp__github__search", {}),
-    "Error: Tool 'mcp__github__search' is unavailable from provider 'github': connection failed.",
-  );
+  assert.deepEqual(await runtime.invokeTool("mcp__github__search", {}), {
+    status: "unavailable",
+    output: "Tool 'mcp__github__search' is unavailable from provider 'github'.",
+  });
 });
 
 test("default orchestration exposes subagent but not teammate or polling tools", async () => {
@@ -451,7 +459,7 @@ test("subagent tool returns a sub_id immediately while the run continues", async
     const out = await currentAgent.run(lead, () =>
       app.toolRuntime.invokeTool("subagent", { prompt: "research X" }),
     );
-    assert.match(out, /Subagent \w+ started/);
+    assert.match(out.output, /Subagent \w+ started/);
     assert.equal(app.subAgentRunner.hasRunning(), true);
 
     while (app.subAgentRunner.hasRunning()) {
@@ -466,7 +474,7 @@ test("forkSubAgent puts role/name/workspace into the child's system prompt", () 
   const tools = ["bash", "read_file", "write_file", "edit_file"].map(toolDefinition);
   const runtime = {
     getToolDefinitions: () => tools,
-    invokeTool: async () => "",
+    invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
   };
   const parent = new Agent({
     toolRuntime: runtime as never,
@@ -504,7 +512,7 @@ test("forkSubAgent narrows allowedTools to the profile and never widens it", () 
   const tools = ["bash", "read_file", "write_file", "edit_file"].map(toolDefinition);
   const runtime = {
     getToolDefinitions: () => tools,
-    invokeTool: async () => "",
+    invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
   };
   const parent = new Agent({ toolRuntime: runtime as never, workspaceRoot: "/tmp/ws" });
 
@@ -548,18 +556,6 @@ test("the executing agent and its id are available via the currentAgent ALS", ()
   );
 
   assert.equal(result, "reviewer");
-});
-
-test("requireNonEmptyString returns tool-scoped errors for missing text", () => {
-  assert.deepEqual(requireNonEmptyString({}, "prompt", "task tool"), {
-    error: "Error: Missing required 'prompt' for task tool.",
-  });
-  assert.deepEqual(requireNonEmptyString({ prompt: "  " }, "prompt", "task tool"), {
-    error: "Error: Missing required 'prompt' for task tool.",
-  });
-  assert.deepEqual(requireNonEmptyString({ prompt: 42 }, "prompt", "task tool"), {
-    value: "42",
-  });
 });
 
 test("pushTaggedUserMessage appends xml-like user blocks consistently", () => {

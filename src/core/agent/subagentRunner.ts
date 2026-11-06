@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { ToolExecutionError } from "../tools/errors.js";
 import type { Agent } from "./agent.js";
 import { AgentRuntime } from "./runtime.js";
 import { createAgentRun, type AgentRun } from "./run.js";
@@ -62,7 +63,10 @@ export class SubAgentRunner {
 
   run(parent: Agent, prompt: string, options: SubAgentRunOptions = {}): string {
     if (this.runningCount() >= this.maxConcurrent) {
-      return `Error: too many running subagents (max ${this.maxConcurrent}). Wait for one to finish.`;
+      throw new ToolExecutionError(
+        `Too many running subagents (max ${this.maxConcurrent}). Wait for one to finish.`,
+        { status: "blocked" },
+      );
     }
 
     const subId = crypto.randomUUID().slice(0, 8);

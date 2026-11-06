@@ -1,5 +1,3 @@
-import { formatError } from "../errors.js";
-import type { ToolInput } from "../input.js";
 import type { TaskItemInput, TaskManager } from "./taskManager.js";
 import { builtinTool, type RegisteredTool } from "../types.js";
 
@@ -14,16 +12,20 @@ export function createUpdateTasksTool(deps: { taskManager: TaskManager }): Regis
         properties: {
           tasks: {
             type: "array",
+            minItems: 1,
             description: "The tasks to create or update.",
             items: {
               type: "object",
+              anyOf: [{ required: ["id"] }, { required: ["subject"] }],
               properties: {
                 id: {
                   type: "integer",
+                  minimum: 1,
                   description: "Existing task id to update. Omit to create.",
                 },
                 subject: {
                   type: "string",
+                  pattern: "\\S",
                   description: "Brief actionable title (required when creating).",
                 },
                 status: {
@@ -38,18 +40,9 @@ export function createUpdateTasksTool(deps: { taskManager: TaskManager }): Regis
         required: ["tasks"],
       },
     },
-    (input) => runUpdateTasks(input, deps.taskManager),
+    (input) => ({
+      status: "completed",
+      output: deps.taskManager.applyMany(input.tasks as TaskItemInput[]),
+    }),
   );
-}
-
-function runUpdateTasks(input: ToolInput, taskManager: TaskManager): string {
-  const tasks = (input as { tasks?: unknown }).tasks;
-  if (!Array.isArray(tasks) || tasks.length === 0) {
-    return "Error: 'tasks' must be a non-empty array for update_tasks.";
-  }
-  try {
-    return taskManager.applyMany(tasks as TaskItemInput[]);
-  } catch (error) {
-    return formatError(error);
-  }
 }

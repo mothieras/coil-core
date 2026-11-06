@@ -83,7 +83,7 @@ console.log(cancellation.status, cancellation.cleanup);
 - `cleanup.status` 区分 `not_needed`、`confirmed` 和 `unconfirmed`。`unconfirmed` 表示仍有资源或结果无法确认，不代表执行已停止；详情在 `resources` 和 `errors`。旧会话缺少该字段时只能视为未记录。
 - `SessionController.cancelRun(id?)` 默认取消最近的主运行及其活动后代。`waitForAsyncWork({ shouldStop })` 仅停止等待，不取消工作。`close()` 拒绝新工作，停止全部所属工作和辅助请求，关闭共享连接，然后保存。重复关闭复用同一个 Promise；多个重要失败通过 `AggregateError.errors` 保留。
 - 资源清理共享 5 秒预算；保存另有 5 秒预算。保存超时意味着保存未确认，不能推断文件系统操作已停止，也不自动重试。同步阻塞事件循环的自定义工具无法被抢占。
-- 自定义 `Provider.generate`、工具 handler 和权限回调接收可选 `signal`。工具仍返回字符串；取消等控制结果使用公开的 `ExecutionStoppedError`，不能转换成普通成功文本。忽略信号的操作保留实际完成跟踪；它真正结束前，同一 Agent 不能进入新运行。
+- 自定义 `Provider.generate`、工具 handler 和权限回调接收可选 `signal`。工具返回结构化结果；取消等控制结果使用公开的 `ExecutionStoppedError`，不能转换成普通成功文本。忽略信号的操作保留实际完成跟踪；它真正结束前，同一 Agent 不能进入新运行。
 - 单个 MCP 请求取消不会关闭共享 server。远端操作不能证明已停止时保守报告未确认；其迟到结果不再改写活动消息。session 关闭才释放共享 MCP client。
 - 前台和后台 shell 使用引擎创建的独立进程组，先 TERM，最多等 2 秒，再 KILL，最多等 1 秒，受总预算限制。当前已在 **macOS arm64 / Node 24** 验证进程及受管后代退出；Linux 是现有 CI 的验证目标，本轮尚无 Linux 执行证据。Windows 不承诺进程树清理。
 - 不保证终止自行脱离进程组的后代或远端副作用，**取消不会回滚已经写入的文件、发出的请求或其他副作用**。本阶段也不承诺崩溃后的事务恢复或跨恢复的结果恰好交付一次。
@@ -93,6 +93,45 @@ TUI 保持现有布局：运行或权限等待时按 **Ctrl+C** 取消运行；�
 ### 自定义工具装配迁移
 
 `BuiltinServices`、`loadBuiltinTools` 和 `createSubagentTools` 不再接收 `subAgentRunner/checkPermission`，改为注入 `startSubagent(prompt, options, context)`。使用 `createAppContext` 的调用者无需自行装配。自定义 host 应在 agent/app 层解析父身份并继承权限；工具目录只解析中立输入。协调类型 `SubAgentRunner` 与 `forkSubAgent` 已移到 agent 模块并通过 core 导出；旧 tools 深路径已删除。子代理工具范围取固定 profile、父范围和请求范围的交集。
+
+### 工具结果与校验迁移（M2）
+
+`ToolHandler` 和 `ToolRuntime.invokeTool()` 不再返回字符串，而是返回 `ToolExecutionResult`：
+
+```ts
+import { builtinTool } from "coil-core";
+
+const echo = builtinTool(
+  {
+    name: "echo",
+    description: "Echo text.",
+    parameters: {
+      type: "object",
+      properties: { text: { type: "string" } },
+      required: ["text"],
+    },
+  },
+  (input) => ({ status: "completed", output: input.text as string }),
+);
+app.toolRuntime.registerTool(echo);
+const result = await app.toolRuntime.invokeTool("echo", { text: "hello" });
+console.log(result.status, result.output);
+```
+
+- 状态包括 `completed`、`unavailable`、`invalid_input`、`blocked`、`permission_denied`、`error`、`cancelled`、`timeout`、`unconfirmed`、`not_executed`。只有 `completed` 对应模型的 `isError: false`。文本中的 `Error:` 没有控制含义；MCP 的 `isError` 和 shell 退出码决定分类。
+- 可修正失败返回 `{ status: "error", output: "修正建议" }`，或抛 `ToolExecutionError`。未知异常以 `ToolInvocationError` 终止运行，宿主可检查 `cause`、`toolName`、`toolCallId`、`runId`；不要直接序列化 cause，它可能包含敏感数据。任务存储故障不当作模型可修正失败。
+- 取消、超时和停止未确认仍通过 `ExecutionStoppedError` 传播；handler 返回对应结构化状态时，runtime 也会将其转为控制异常。不能确认远端停止时使用 `unconfirmed`，可加 `stopReason: "timeout"` 保留原因。这些状态会停止后续派发，不是让模型继续尝试的普通工具结果。
+- registry 编译工具提供的 JSON Schema；runtime 严格检查参数，不转换字符串数字、不注入默认值、不丢弃无效数组项。旧的 `requireString/requireNonEmptyString/optionalInteger` 等宽松解析辅助函数已删除，请把静态约束写入 schema。handler 只处理动态业务条件；不要直接调用 `registry.getHandler()` 绕过运行时门禁。
+- loop 顺序为：取消检查 → 工具范围 → 管理 hook → 可用性和参数校验 → 权限 → 再查取消 → handler。直接调用 `invokeTool` 是受信任的宿主入口；需要授权时提供 `context.beforeInvoke`，它只会在参数验证通过后执行。子代理范围仍只收窄。
+- 模型消息 `details`、生命周期事件和 session 投影保留状态与 `dispatched`；停止时还保留 `stopReason`。旧记录没有派发字段时表示未记录。批次停止或致命失败会补齐未执行结果，不自动重放，也不回滚已经发生的副作用。
+- `BackgroundManager.run` 的危险命令拒绝、`SubAgentRunner.run` 的满额拒绝现在抛 `ToolExecutionError`，不再返回错误字符串。迁移直接使用这些入口的宿主时，应同步处理异常。
+
+无凭据运行自定义工具示例，验证实际构建导出、成功结果和无效输入无副作用：
+
+```bash
+pnpm build
+pnpm exec tsx examples/custom-tool.ts
+```
 
 ## Architecture
 

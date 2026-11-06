@@ -1,3 +1,5 @@
+import { testToolInvoker } from "./helpers/tools.js";
+import { ToolExecutionError, ToolInvocationError } from "../src/core/tools/errors.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -20,7 +22,7 @@ function toolUseResponse(name: string, input: Record<string, unknown>): Assistan
 function emptyRuntime() {
   return {
     getToolDefinitions: () => [],
-    invokeTool: async () => "",
+    invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
   } as never;
 }
 
@@ -181,10 +183,10 @@ test("agent loop lifecycle records assistant and completed tool events in order"
       },
     ],
     getToolSource: () => ({ type: "builtin" as const }),
-    invokeTool: async () => {
+    invokeTool: testToolInvoker(async () => {
       invoked = true;
-      return "tool output";
-    },
+      return { status: "completed", output: await "tool output" };
+    }),
   } as never;
   const agent = new Agent({ id: "lead", toolRuntime: runtime, provider });
   agent.messages.push(userMessage("use tool"));
@@ -242,7 +244,7 @@ test("agent loop emits permission requested and resolved when user approval is r
       },
     ],
     getToolSource: () => ({ type: "builtin" as const }),
-    invokeTool: async () => "ok",
+    invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "ok" })),
   } as never;
   const agent = new Agent({
     id: "lead",
@@ -310,7 +312,10 @@ test("agent loop emits permission resolved without requested for hard denies", a
       },
     ],
     getToolSource: () => ({ type: "builtin" as const }),
-    invokeTool: async () => "should not run",
+    invokeTool: testToolInvoker(async () => ({
+      status: "completed",
+      output: await "should not run",
+    })),
   } as never;
   const agent = new Agent({
     id: "lead",
@@ -364,10 +369,10 @@ test("agent loop lifecycle records legacy PreToolUse blocks", async () => {
       },
     ],
     getToolSource: () => ({ type: "builtin" as const }),
-    invokeTool: async () => {
+    invokeTool: testToolInvoker(async () => {
       invoked = true;
-      return "should not run";
-    },
+      return { status: "completed", output: await "should not run" };
+    }),
   } as never;
   const agent = new Agent({ id: "lead", toolRuntime: runtime, hooks, provider });
   agent.messages.push(userMessage("use tool"));
@@ -385,7 +390,7 @@ test("agent loop lifecycle records legacy PreToolUse blocks", async () => {
   assert.equal(toolFinished?.type, "tool_finished");
   if (toolFinished?.type === "tool_finished") {
     assert.equal(toolFinished.status, "blocked");
-    assert.equal(toolFinished.resultSummary, "blocked by policy");
+    assert.equal(toolFinished.error, "blocked by policy");
   }
 });
 
@@ -415,10 +420,10 @@ test("agent loop rejects tool calls outside allowedTools without throwing", asyn
       },
     ],
     getToolSource: () => ({ type: "builtin" as const }),
-    invokeTool: async () => {
+    invokeTool: testToolInvoker(async () => {
       invoked = true;
-      return "should not run";
-    },
+      return { status: "completed", output: await "should not run" };
+    }),
   } as never;
   const agent = new Agent({
     id: "lead",
@@ -449,7 +454,7 @@ test("agent loop rejects tool calls outside allowedTools without throwing", asyn
   assert.equal(toolFinished?.type, "tool_finished");
   if (toolFinished?.type === "tool_finished") {
     assert.equal(toolFinished.status, "blocked");
-    assert.match(toolFinished.resultSummary ?? "", /write_file/);
+    assert.match(toolFinished.error ?? "", /write_file/);
   }
   const toolResult = agent.messages.find((message) => message.role === "toolResult");
   assert.ok(toolResult && toolResult.role === "toolResult");
@@ -480,7 +485,10 @@ test("agent loop lifecycle redacts tool input and avoids raw tool output", async
       },
     ],
     getToolSource: () => ({ type: "builtin" as const }),
-    invokeTool: async () => "Wrote secret material to disk",
+    invokeTool: testToolInvoker(async () => ({
+      status: "completed",
+      output: await "Wrote secret material to disk",
+    })),
   } as never;
   const agent = new Agent({ id: "lead", toolRuntime: runtime, provider });
   agent.messages.push(userMessage("write secret"));
@@ -526,7 +534,10 @@ test("agent loop lifecycle closes tool events when PreToolUse throws", async () 
       },
     ],
     getToolSource: () => ({ type: "builtin" as const }),
-    invokeTool: async () => "should not run",
+    invokeTool: testToolInvoker(async () => ({
+      status: "completed",
+      output: await "should not run",
+    })),
   } as never;
   const agent = new Agent({ id: "lead", toolRuntime: runtime, hooks, provider });
   agent.messages.push(userMessage("use tool"));
@@ -537,7 +548,10 @@ test("agent loop lifecycle closes tool events when PreToolUse throws", async () 
     trigger: { type: "user_message" },
   });
 
-  await assert.rejects(() => new AgentRuntime(collector).run(agent, run), /policy/);
+  await assert.rejects(
+    () => new AgentRuntime(collector).run(agent, run),
+    (error) => error instanceof ToolInvocationError && /policy/.test(String(error.cause)),
+  );
 
   assert.deepEqual(
     collector.events
@@ -549,7 +563,7 @@ test("agent loop lifecycle closes tool events when PreToolUse throws", async () 
   assert.equal(toolFinished?.type, "tool_finished");
   if (toolFinished?.type === "tool_finished") {
     assert.equal(toolFinished.status, "error");
-    assert.match(toolFinished.error ?? "", /\[redacted\]/);
+    assert.match(toolFinished.error ?? "", /failed internally/);
     assert.doesNotMatch(toolFinished.error ?? "", /abc123/);
   }
 });
@@ -566,7 +580,10 @@ test("agent loop lifecycle closes tool events when permission checker rejects", 
       },
     ],
     getToolSource: () => ({ type: "builtin" as const }),
-    invokeTool: async () => "should not run",
+    invokeTool: testToolInvoker(async () => ({
+      status: "completed",
+      output: await "should not run",
+    })),
   } as never;
   const agent = new Agent({
     id: "lead",
@@ -584,13 +601,16 @@ test("agent loop lifecycle closes tool events when permission checker rejects", 
     trigger: { type: "user_message" },
   });
 
-  await assert.rejects(() => new AgentRuntime(collector).run(agent, run), /permission/);
+  await assert.rejects(
+    () => new AgentRuntime(collector).run(agent, run),
+    (error) => error instanceof ToolInvocationError && /permission/.test(String(error.cause)),
+  );
 
   const toolFinished = collector.events.find((event) => event.type === "tool_finished");
   assert.equal(toolFinished?.type, "tool_finished");
   if (toolFinished?.type === "tool_finished") {
     assert.equal(toolFinished.status, "error");
-    assert.match(toolFinished.error ?? "", /\[redacted\]/);
+    assert.match(toolFinished.error ?? "", /failed internally/);
     assert.doesNotMatch(toolFinished.error ?? "", /abc123/);
   }
 });
@@ -611,9 +631,9 @@ test("agent loop lifecycle marks direct tool invocation errors as error", async 
       },
     ],
     getToolSource: () => ({ type: "builtin" as const }),
-    invokeTool: async () => {
-      throw new Error("boom token=abc123");
-    },
+    invokeTool: testToolInvoker(async () => {
+      throw new ToolExecutionError("boom token=abc123");
+    }),
   } as never;
   const agent = new Agent({ id: "lead", toolRuntime: runtime, provider });
   agent.messages.push(userMessage("use tool"));
@@ -630,7 +650,7 @@ test("agent loop lifecycle marks direct tool invocation errors as error", async 
   assert.equal(toolFinished?.type, "tool_finished");
   if (toolFinished?.type === "tool_finished") {
     assert.equal(toolFinished.status, "error");
-    assert.match(toolFinished.resultSummary ?? "", /^error output \(/);
+    assert.match(toolFinished.resultSummary ?? "", /^output \(/);
     assert.match(toolFinished.error ?? "", /\[redacted\]/);
     assert.doesNotMatch(toolFinished.error ?? "", /abc123/);
   }
@@ -643,7 +663,7 @@ test("AgentRuntime marks an AgentRun failed when the loop throws", async () => {
       getToolDefinitions: () => {
         throw new Error("boom");
       },
-      invokeTool: async () => "",
+      invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
     } as never,
     provider: fakeProvider(() => textResponse("unused")),
   });

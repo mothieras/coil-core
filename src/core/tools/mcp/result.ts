@@ -1,8 +1,10 @@
 import type { McpToolResult, McpToolResultContent } from "./types.js";
 
-export function normalizeMcpResult(result: McpToolResult): string {
+import type { ToolExecutionResult } from "../types.js";
+
+export function normalizeMcpResult(result: McpToolResult): ToolExecutionResult {
   const content = result.content.map(formatContent).join("\n");
-  return result.isError ? `Error: MCP tool returned error.\n${content}` : content;
+  return { status: result.isError ? "error" : "completed", output: content };
 }
 
 function formatContent(content: McpToolResultContent): string {

@@ -3,6 +3,24 @@ import type { ToolHandler } from "./input.js";
 
 export type ToolDefinition = Tool;
 
+export type ToolResultStatus =
+  | "completed"
+  | "unavailable"
+  | "invalid_input"
+  | "blocked"
+  | "permission_denied"
+  | "error"
+  | "cancelled"
+  | "timeout"
+  | "unconfirmed"
+  | "not_executed";
+
+export type ToolExecutionResult = {
+  status: ToolResultStatus;
+  output: string;
+  stopReason?: "aborted" | "timeout" | undefined;
+};
+
 export type ToolSource =
   { type: "builtin" } | { type: "mcp"; serverName: string; originalName: string };
 

@@ -1,3 +1,5 @@
+import { redactToolDiagnostic } from "../tools/errors.js";
+
 const SUMMARY_CHAR_LIMIT = 500;
 const MAX_ARRAY_ITEMS = 5;
 const MAX_OBJECT_DEPTH = 4;
@@ -17,7 +19,7 @@ type SummaryOptions = {
 };
 
 export function summarizeLifecycleText(text: string): string {
-  return truncateLifecycleSummary(redactSecrets(text));
+  return truncateLifecycleSummary(redactToolDiagnostic(text));
 }
 
 export function summarizeLifecycleValue(value: unknown): string {
@@ -31,8 +33,7 @@ export function summarizeToolInput(toolName: string, value: unknown): string {
 export function summarizeToolResult(output: string): string {
   const chars = output.length;
   const lines = output === "" ? 0 : output.split(/\r?\n/).length;
-  const label = isToolErrorOutput(output) ? "error output" : "output";
-  return `${label} (${chars} chars, ${lines} line${lines === 1 ? "" : "s"})`;
+  return `output (${chars} chars, ${lines} line${lines === 1 ? "" : "s"})`;
 }
 
 export function summarizeLifecycleError(error: unknown): string {
@@ -40,10 +41,6 @@ export function summarizeLifecycleError(error: unknown): string {
     return summarizeLifecycleText(`${error.name}: ${error.message}`);
   }
   return summarizeLifecycleValue(error);
-}
-
-export function isToolErrorOutput(output: string): boolean {
-  return output.trimStart().startsWith("Error:");
 }
 
 function summarizeValue(value: unknown, options: SummaryOptions = {}): unknown {
@@ -107,17 +104,6 @@ function shouldSummarizeRawContent(toolName: string | undefined, key: string): b
 function summarizeRawValue(value: unknown): string {
   const text = typeof value === "string" ? value : stringifySummary(value);
   return `[content omitted: ${text.length} chars]`;
-}
-
-function redactSecrets(text: string): string {
-  return text
-    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, `$1${REDACTED}`)
-    .replace(/(Basic\s+)[A-Za-z0-9._~+/=-]+/gi, `$1${REDACTED}`)
-    .replace(/sk-ant-[A-Za-z0-9_-]+/g, REDACTED)
-    .replace(
-      /([A-Za-z0-9_.-]*(?:api[_-]?key|auth(?:orization)?|password|passwd|secret|token)[A-Za-z0-9_.-]*\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi,
-      `$1${REDACTED}`,
-    );
 }
 
 function truncateLifecycleSummary(text: string): string {

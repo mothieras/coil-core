@@ -18,7 +18,7 @@ function registeredTool(name: string): RegisteredTool {
   return {
     name,
     definition: definition(name),
-    handler: () => `${name} handled`,
+    handler: () => ({ status: "completed", output: `${name} handled` }),
     source: { type: "builtin" },
   };
 }
@@ -30,7 +30,10 @@ test("ToolRegistry returns definitions and handlers for registered tools", async
   registry.register(tool);
 
   assert.deepEqual(registry.getDefinitions(), [tool.definition]);
-  assert.equal(await registry.getHandler("read_file")?.({}), "read_file handled");
+  assert.deepEqual(await registry.getHandler("read_file")?.({}), {
+    status: "completed",
+    output: "read_file handled",
+  });
 });
 
 test("ToolRegistry rejects mismatched registered tool names", () => {
@@ -55,6 +58,17 @@ test("ToolRegistry rejects duplicate tool names", () => {
     () => registry.register(registeredTool("read_file")),
     /Duplicate tool registration: read_file/,
   );
+});
+
+test("schema compilation failure rejects registration rather than blaming model input", () => {
+  const registry = new ToolRegistry();
+  const tool = registeredTool("invalid_schema");
+  tool.definition.parameters = {
+    type: "object",
+    properties: { value: { type: "string", pattern: "[" } },
+  };
+  assert.throws(() => registry.register(tool));
+  assert.equal(registry.hasTool(tool.name), false);
 });
 
 test("ToolRegistry explains unavailable provider namespaces", () => {

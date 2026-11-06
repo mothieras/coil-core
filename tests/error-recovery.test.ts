@@ -1,3 +1,5 @@
+import { testToolInvoker } from "./helpers/tools.js";
+import { ToolExecutionError } from "../src/core/tools/errors.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -30,7 +32,7 @@ function textResponse(text: string, stopReason: StopReason): AssistantMessage {
 
 const emptyRuntime = {
   getToolDefinitions: () => [],
-  invokeTool: async () => "",
+  invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
 };
 
 function toolDefinition(name: string): ToolDefinition {
@@ -325,7 +327,7 @@ test("agentLoop uses the runtime's tool definitions when the agent sets no allow
 
   const runtime = {
     getToolDefinitions: () => [fallbackTool],
-    invokeTool: async () => "",
+    invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
   };
 
   const result = await agentLoop(
@@ -350,7 +352,7 @@ test("agentLoop rejects unknown allowed tools instead of silently filtering", as
       }
       return [fallbackTool];
     },
-    invokeTool: async () => "",
+    invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
   };
 
   await assert.rejects(
@@ -367,7 +369,7 @@ test("agentLoop rejects unknown allowed tools instead of silently filtering", as
   );
 });
 
-test("agentLoop returns thrown tool errors as toolResult content", async () => {
+test("agentLoop returns model-correctable tool errors as toolResult content", async () => {
   const seenMessages: unknown[] = [];
 
   const provider = fakeProvider((request) => {
@@ -380,9 +382,9 @@ test("agentLoop returns thrown tool errors as toolResult content", async () => {
 
   const toolRuntime = {
     getToolDefinitions: () => [],
-    invokeTool: async () => {
-      throw new Error("tool blew up");
-    },
+    invokeTool: testToolInvoker(async () => {
+      throw new ToolExecutionError("tool blew up");
+    }),
   };
 
   const result = await agentLoop(
@@ -397,7 +399,7 @@ test("agentLoop returns thrown tool errors as toolResult content", async () => {
   const lastMessages = seenMessages.at(-1) as Array<{ role: string }>;
   const toolResult = lastMessages.find((message) => message.role === "toolResult");
   assert.ok(toolResult);
-  assert.match(JSON.stringify(toolResult), /Error: tool blew up/);
+  assert.match(JSON.stringify(toolResult), /tool blew up/);
 });
 
 test("decideRecovery aborts instead of continuing truncated toolCall output", () => {

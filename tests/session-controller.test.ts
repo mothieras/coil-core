@@ -1,3 +1,4 @@
+import { testToolInvoker } from "./helpers/tools.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs, { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -37,7 +38,7 @@ function toolUseResponse(name: string, input: Record<string, unknown>): Assistan
 function emptyRuntime() {
   return {
     getToolDefinitions: () => [],
-    invokeTool: async () => "",
+    invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
   } as never;
 }
 
@@ -525,7 +526,7 @@ test("SessionController stores task state under the active session and projects 
     const created = await controller.appContext.toolRuntime.invokeTool("update_tasks", {
       tasks: [{ subject: "Write tests", description: "Cover session tasks" }],
     });
-    assert.match(created, /#1: Write tests/);
+    assert.match(created.output, /#1: Write tests/);
 
     await controller.flush();
 
@@ -1102,7 +1103,7 @@ test("SessionController summarizes raw tool input and output in session files", 
           },
         },
       },
-      handler: () => rawToolOutput,
+      handler: () => ({ status: "completed", output: rawToolOutput }),
       source: { type: "builtin" },
     });
 
@@ -1277,7 +1278,7 @@ test("SessionController subscribers receive normalized conversation and tool eve
         description: "Return output for session view event tests.",
         parameters: { type: "object", properties: {} },
       },
-      handler: () => "tool output",
+      handler: () => ({ status: "completed", output: "tool output" }),
       source: { type: "builtin" },
     });
     const events: SessionViewEvent[] = [];

@@ -1,3 +1,4 @@
+import { testToolInvoker } from "./helpers/tools.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -195,7 +196,7 @@ test("agentLoop feeds real usage into the next compaction check", async () => {
   const agent = new Agent({
     toolRuntime: {
       getToolDefinitions: () => [],
-      invokeTool: async () => "",
+      invokeTool: testToolInvoker(async () => ({ status: "completed", output: await "" })),
     } as never,
     hooks: {
       emitEffect() {},

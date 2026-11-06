@@ -58,7 +58,7 @@ controller.appContext.toolRuntime.registerTool({
     parameters: { type: "object", properties: {} },
   },
   source: { type: "builtin" },
-  handler: () => remote.promise,
+  handler: () => remote.promise.then((output) => ({ status: "completed", output })),
 });
 function Root() {
   const { exit } = useApp();

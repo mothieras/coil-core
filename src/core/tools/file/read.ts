@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { formatError } from "../errors.js";
-import { optionalInteger, requireString } from "../input.js";
-import { builtinTool, type RegisteredTool } from "../types.js";
+import { fileToolFailure } from "../errors.js";
+
+import { builtinTool, type RegisteredTool, type ToolExecutionResult } from "../types.js";
 import { safePath } from "./safePath.js";
 
 const MAX_OUTPUT_CHARS = 50_000;
@@ -10,7 +10,7 @@ async function runReadFile(
   pathArg: string,
   workspaceRoot: string,
   limit?: number,
-): Promise<string> {
+): Promise<ToolExecutionResult> {
   try {
     const text = await readFile(await safePath(pathArg, workspaceRoot), "utf8");
     let lines = text.split(/\r?\n/);
@@ -19,9 +19,9 @@ async function runReadFile(
       lines = lines.slice(0, limit).concat(`... (${lines.length - limit} more lines)`);
     }
 
-    return lines.join("\n").slice(0, MAX_OUTPUT_CHARS);
+    return { status: "completed", output: lines.join("\n").slice(0, MAX_OUTPUT_CHARS) };
   } catch (e) {
-    return formatError(e);
+    return fileToolFailure(e);
   }
 }
 
@@ -39,10 +39,7 @@ export function createReadFileTool(deps: { workspaceRoot: string }): RegisteredT
         required: ["path"],
       },
     },
-    (input) => {
-      const filepath = requireString(input, "path");
-      if (filepath === null) return "Error: Missing required 'path' for read_file tool.";
-      return runReadFile(filepath, deps.workspaceRoot, optionalInteger(input, "limit"));
-    },
+    (input) =>
+      runReadFile(input.path as string, deps.workspaceRoot, input.limit as number | undefined),
   );
 }

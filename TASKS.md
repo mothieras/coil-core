@@ -1,8 +1,8 @@
 # Agent runtime 架构优化与可靠性打磨任务清单
 
-状态：M0、M1 已完成，M2–M5 未开始。依据：[SPEC.md](SPEC.md)、[PLAN.md](PLAN.md)。代码基线：`54551bc`。
+状态：M0–M2 已完成，M3–M5 未开始。依据：[SPEC.md](SPEC.md)、[PLAN.md](PLAN.md)。代码基线：`54551bc`。
 
-用户本次明确授权完成 M1（T005–T020），未授权提交或发布；本轮串行实现，未使用子代理。SPEC 第 9 节沿用 M0 已确认的默认行为及限定兼容演进。下方 M0 的授权和基线描述为历史记录：该次只完成只读审查，使用一个获准的只读子代理。后续 M2–M5 不在本次范围内。
+用户本次明确授权完成 M2（T021–T026），并确认统一结构化结果的公共接口破坏性迁移；未授权提交或发布。本轮串行实现，未使用子代理。SPEC 第 9.7 节记录 M2 决策。下方 M0/M1 的授权与基线描述为历史记录；M3–M5 不在本次范围内。
 
 ## 1. 使用约定
 
@@ -186,41 +186,47 @@ pnpm format:check
 
 ## 4. M2：工具执行契约
 
-- [ ] **T021 决定工具结果与校验职责的演进方案**
+- [x] **T021 决定工具结果与校验职责的演进方案**
   - 来源：PLAN M2-01；SPEC T1、T2、A4。依赖：T020。
   - 范围：`src/core/tools/types.ts`、`src/core/tools/input.ts`、`src/core/tools/registry.ts`、已有依赖与工具 schema。
   - 完成条件：把结果分类、模型侧映射、校验位置、hook/权限顺序及公共兼容方案写回 SPEC；先评估现有能力，不预选新验证库或自制完整 schema 引擎。
   - 验证：覆盖内置工具、自定义工具、MCP 和 M1 控制结果的映射；破坏性变更先确认。
+  - 证据：用户明确选择“统一结构化结果”，批准 handler/invokeTool 破坏性迁移。已检查 pi-ai 1.4.0 校验包装器及本地 TypeBox 1.3.27：前者强制转换且回显参数，后者 Check/Errors 可严格验证现有 schema。SPEC 9.7 冻结分类、顺序、控制异常、注册方责任和兼容方案；同版本 TypeBox 提升为直接依赖，lockfile 仅增加该 importer。实现前新增测试因缺少新错误类型失败，之后按契约实现。
 
-- [ ] **T022 实现结构化执行结果并统一调用方**
+- [x] **T022 实现结构化执行结果并统一调用方**
   - 来源：PLAN M2-01；SPEC T1；V07。依赖：T021。
   - 范围：工具类型、runtime、内置工具组、`src/core/tools/mcp/handler.ts`、loop 消费端、`examples/custom-tool.ts`。
   - 完成条件：成功、不可用、无效输入、拒绝、失败、取消、超时、停止未确认可区分；生产者和消费者同次迁移；不靠 `Error:` 前缀控制执行。
   - 验证：工具注册、MCP provider 和 loop 测试；普通输出含 `Error:` 不应误分类，真实失败不因文本缺少前缀而误报成功。
+  - 证据：`ToolExecutionResult` 统一内置工具、自定义工具和 MCP；模型、lifecycle、projection、report 保留 status/dispatched/stopReason，TUI 同步新增状态。`tests/tool-runtime.test.ts`、`tests/mcp-provider.test.ts` 覆盖含 Error 前缀的成功、无前缀失败和协议 isError；原字符串 helper/前缀分类删除。`pnpm exec tsx --test tests/tool-runtime.test.ts tests/tool-registry.test.ts tests/tui-components.test.tsx` 22 项通过。
 
-- [ ] **T023 实现单一参数校验与执行门禁顺序**
+- [x] **T023 实现单一参数校验与执行门禁顺序**
   - 来源：PLAN M2-01；SPEC T2；V07。依赖：T022。
   - 范围：registry/runtime、工具输入、hooks、permission 和子代理 profiles。
   - 完成条件：无效参数不执行 handler；工具范围、管理阻止与权限规则全部保留，子代理权限不扩大；返回可修正诊断而非模糊失败。
   - 验证：拟新增 `tests/tool-runtime.test.ts` 或扩展现有测试，使用 handler 副作用计数验证拒绝、无效输入与授权顺序。
+  - 证据：registry 编译、runtime 唯一派发点严格校验；范围 → 管理 hook → 校验 → 权限 → 取消复查 → handler。`tests/tool-runtime.test.ts`、`tests/tool-batches.test.ts`、`tests/task-tools.test.ts` 用实际 runtime 验证 null/数组根、字符串数字、嵌套错误、解析失败、拒绝与管理阻止的调用计数；无效任务批次不写文件，权限修改不能改写已验证输入，取消后不派发。既有子代理权限交集回归通过。
 
-- [ ] **T024 区分普通工具错误与致命故障**
+- [x] **T024 区分普通工具错误与致命故障**
   - 来源：PLAN M2-02；SPEC T3；V07。依赖：T023。
   - 范围：`src/core/tools/errors.ts`、`src/core/tools/file/bash.ts`、runtime/loop 错误传播和报告。
   - 完成条件：模型可修正错误可反馈；取消、内部不变量和存储故障不吞成普通结果；保留 cause 与调用身份；shell 非零退出即使有输出也不能成功。
   - 验证：不同错误分类及进程非零退出用例；诊断保留必要信息但不泄露凭据。
+  - 证据：`ToolExecutionError` 表示可修正失败/阻止，未知异常经 `ToolInvocationError` 保留 cause、工具名、toolCallId/runId 并终止；任务存储读写错误不再伪装为空列表。`tests/tool-batches.test.ts` 制造真实 ENOTDIR，检查 cause、failed 终态和后续副作用为零；`tests/tool-runtime.test.ts` 运行真实 shell，验证非零退出和敏感诊断；schema 编译故障与内部异常测试通过。
 
-- [ ] **T025 完善失败批次的上下文与事件关联**
+- [x] **T025 完善失败批次的上下文与事件关联**
   - 来源：PLAN M2-02；SPEC T4；V08。依赖：T024。
   - 范围：`src/core/loop/loop.ts`、`src/core/loop/response.ts`、生命周期和投影。
   - 完成条件：覆盖批次中成功、拒绝、失败、取消的组合；未执行调用可识别，消息配对合法；M1 最小分类并入统一契约，无双轨遗留。
   - 验证：`tests/agent.test.ts`、`tests/runtime-lifecycle.test.ts`；断言下一次请求的完整消息和实际工具调用次数。
+  - 证据：`tests/tool-batches.test.ts` 检查混合批次的完整下一次请求、消息配对、事件顺序、派发事实和仅已派发调用触发 PostToolUse。致命故障及 M1 取消回归均补齐 not_executed，不重放成功结果；结构化取消/超时/未确认和 M1 控制异常走同一停止路径，direct loop 与 managed run 均验证。`tests/mcp-cancellation.test.ts` 真实 10 秒请求超时保持 timeout/unconfirmed，禁止后续写文件，同时另一共享调用成功；两项真实 MCP 测试退出 0。
 
-- [ ] **T026 M2 阶段验收**
+- [x] **T026 M2 阶段验收**
   - 来源：PLAN M2-01、M2-02；SPEC V07、V08。
   - 依赖：T021、T022、T023、T024、T025。
   - 完成条件：工具契约和消费者迁移完成，通用阶段检查及 M1 回归通过；更新 PLAN M2 汇总。
   - 验证：自定义工具示例仍可用，既有 MCP 和权限路径无回退，最终 diff 无文本分类控制分支残留。
+  - 证据：V07 对应 tool-runtime、tool-registry、task-tools、mcp-provider、tool-batches；V08 对应 tool-batches、tool-cancellation、agent-runtime。最终 `pnpm test` 283 通过、0 失败/跳过/取消；`pnpm exec tsc --noEmit`、`pnpm typecheck:tests`、`pnpm lint`、`pnpm format:check`、`pnpm build` 均退出 0。构建消费者 `pnpm exec tsx examples/custom-tool.ts` 输出 completed/invalid_input，`pnpm exec tsx examples/cancel-run.ts` 输出 interrupted/aborted/confirmed 且确认真实 PID 退出。新增 TUI 状态通过组件测试与实际 80×24 Ink PTY 检查（NO_COLOR=1、FORCE_COLOR=0，无 ANSI 颜色）；错误/未执行使用 ×，停止未确认使用 !，未改布局；机械检测空 findings。已审查最终 diff 和文档呈现。M2 起点 `783a9f2`、工作区初始干净；串行完成，无子代理、提交或发布。仅本机 macOS arm64/Node 24.21.0；线上模型、Linux/Windows 和 M3–M5 不在验证声明内。
 
 ## 5. M3：持久化与安全恢复
 
@@ -381,9 +387,9 @@ pnpm format:check
 | ---- | --------- | ---- | -------- |
 | M0   | T001–T004 | T004 | 已完成   |
 | M1   | T005–T020 | T020 | 已完成   |
-| M2   | T021–T026 | T026 | 未开始   |
+| M2   | T021–T026 | T026 | 已完成   |
 | M3   | T027–T036 | T036 | 未开始   |
 | M4   | T037–T043 | T043 | 未开始   |
 | M5   | T044–T047 | T047 | 未开始   |
 
-M0 的 T001–T004、M1 的 T005–T020 已完成。M1 平台与消费者证据见上述任务，PLAN 已同步阶段出口；下一项为 M2 的 T021，需另行授权该阶段。未提交、推送或发布。
+M0 的 T001–T004、M1 的 T005–T020、M2 的 T021–T026 已完成。平台与消费者证据见上述任务，PLAN 已同步阶段出口；下一项为 M3 的 T027，需另行授权该阶段。未提交、推送或发布。

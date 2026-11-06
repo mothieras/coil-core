@@ -1,4 +1,3 @@
-import { requireNonEmptyString } from "../input.js";
 import type { BackgroundManager } from "./backgroundManager.js";
 import { builtinTool, type RegisteredTool } from "../types.js";
 
@@ -13,15 +12,14 @@ export function createBackgroundRunTool(deps: {
       parameters: {
         type: "object",
         properties: {
-          command: { type: "string", description: "The shell command to run." },
+          command: { type: "string", pattern: "\\S", description: "The shell command to run." },
         },
         required: ["command"],
       },
     },
-    (input, context) => {
-      const command = requireNonEmptyString(input, "command", "background_run");
-      if ("error" in command) return command.error;
-      return deps.backgroundManager.run(command.value, context);
-    },
+    (input, context) => ({
+      status: "completed",
+      output: deps.backgroundManager.run(input.command as string, context),
+    }),
   );
 }

@@ -1,22 +1,24 @@
 import { startManagedProcess } from "./process.js";
-import { requireNonEmptyString } from "../input.js";
 import { isDangerousCommand } from "./shellSafety.js";
-import { builtinTool, type RegisteredTool } from "../types.js";
+import { builtinTool, type RegisteredTool, type ToolExecutionResult } from "../types.js";
 
 async function runBash(
   command: string,
   workspaceRoot: string,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<ToolExecutionResult> {
   if (isDangerousCommand(command)) {
-    return "Error: Dangerous command blocked";
+    return { status: "blocked", output: "Dangerous command blocked" };
   }
 
   const result = await startManagedProcess(command, workspaceRoot, { signal, timeoutMs: 120_000 })
     .done;
   return result.code === 0
-    ? result.output
-    : `Error: Command exited ${result.code ?? result.signal}\n${result.output}`;
+    ? { status: "completed", output: result.output }
+    : {
+        status: "error",
+        output: `Command exited ${result.code ?? result.signal}\n${result.output}`,
+      };
 }
 
 export function createBashTool(deps: { workspaceRoot: string }): RegisteredTool {
@@ -27,15 +29,11 @@ export function createBashTool(deps: { workspaceRoot: string }): RegisteredTool 
       parameters: {
         type: "object",
         properties: {
-          command: { type: "string" },
+          command: { type: "string", pattern: "\\S" },
         },
         required: ["command"],
       },
     },
-    (input, context) => {
-      const command = requireNonEmptyString(input, "command", "bash tool");
-      if ("error" in command) return command.error;
-      return runBash(command.value, deps.workspaceRoot, context?.signal);
-    },
+    (input, context) => runBash(input.command as string, deps.workspaceRoot, context?.signal),
   );
 }

@@ -26,7 +26,7 @@ function registeredTool(name: string): RegisteredTool {
   return {
     name,
     definition: definition(name),
-    handler: () => `${name} handled`,
+    handler: () => ({ status: "completed", output: `${name} handled` }),
     source: { type: "builtin" },
   };
 }

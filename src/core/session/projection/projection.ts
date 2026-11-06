@@ -210,6 +210,8 @@ function applyRuntimeLifecycleEvent(
             status: runtimeEvent.status,
           };
       updated.status = runtimeEvent.status;
+      if (runtimeEvent.dispatched !== undefined) updated.dispatched = runtimeEvent.dispatched;
+      if (runtimeEvent.stopReason !== undefined) updated.stopReason = runtimeEvent.stopReason;
       updated.finishedAt = runtimeEvent.timestamp;
       if (runtimeEvent.source !== undefined) updated.source = runtimeEvent.source;
       if (runtimeEvent.resultSummary !== undefined) {

@@ -5,6 +5,8 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { StdioMcpClient } from "../src/core/tools/mcp/stdioClient.js";
+import { createRuntimeLifecycleCollector } from "../src/core/agent/lifecycle.js";
+import { AgentRuntime } from "../src/core/agent/runtime.js";
 import { createMcpHandler } from "../src/core/tools/mcp/handler.js";
 import { createAppContext } from "../src/core/app/context.js";
 import { Agent } from "../src/core/agent/agent.js";
@@ -76,6 +78,76 @@ test(
       await closed;
       assert.throws(() => process.kill(pid!, 0), { code: "ESRCH" });
       await assert.rejects(client.callTool("echo", {}), /closed/);
+    } finally {
+      await client.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "real MCP request timeout remains unconfirmed, stops the batch and leaves the shared connection usable",
+  { timeout: 15_000 },
+  async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "coil-mcp-timeout-"));
+    const client = new StdioMcpClient({
+      name: "fixture",
+      command: process.execPath,
+      args: [
+        "--import",
+        "tsx",
+        fileURLToPath(new URL("./fixtures/cancellation-mcp-server.ts", import.meta.url)),
+        path.join(dir, "entered"),
+      ],
+    });
+    const app = createAppContext(dir);
+    app.toolRuntime.registerTool({
+      name: "remote",
+      definition: {
+        name: "remote",
+        description: "wait",
+        parameters: { type: "object", properties: {} },
+      },
+      source: { type: "mcp", serverName: "fixture", originalName: "wait" },
+      handler: createMcpHandler(client, {
+        type: "mcp",
+        serverName: "fixture",
+        originalName: "wait",
+      }),
+    });
+    const events = createRuntimeLifecycleCollector();
+    const runner = new AgentRuntime(events);
+    const agent = new Agent({
+      toolRuntime: app.toolRuntime,
+      provider: fakeProvider(() =>
+        toolCallMessage([
+          toolCall("remote", {}, "wait"),
+          toolCall("write_file", { path: "must-not-exist", content: "bad" }, "later"),
+        ]),
+      ),
+    });
+    const run = createAgentRun({
+      agentId: "lead",
+      agentKind: "lead",
+      trigger: { type: "user_message" },
+    });
+    try {
+      await runner.run(agent, run);
+      assert.equal(run.stopReason, "timeout");
+      assert.equal(run.cleanup?.status, "unconfirmed");
+      assert.deepEqual(
+        events.events
+          .filter((e) => e.type === "tool_finished")
+          .map((e) => [e.status, e.dispatched, e.stopReason]),
+        [
+          ["unconfirmed", true, "timeout"],
+          ["not_executed", false, undefined],
+        ],
+      );
+      await assert.rejects(readFile(path.join(dir, "must-not-exist")), { code: "ENOENT" });
+      assert.match(JSON.stringify(await client.callTool("echo", {})), /echo complete/);
+      // Timeout is not a remote cancellation; explicitly release the fixture's pending operation.
+      await client.callTool("release", {});
     } finally {
       await client.close();
       await rm(dir, { recursive: true, force: true });

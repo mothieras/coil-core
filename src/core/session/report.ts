@@ -72,7 +72,9 @@ export function buildSessionReport(
     lines.push("- No failed or blocked tool calls recorded.");
   } else {
     for (const call of failedTools.slice(-10)) {
-      lines.push(`- ${call.toolName}: ${call.error ?? call.status}`);
+      lines.push(
+        `- ${call.toolName} (${call.id}): ${call.status}; dispatched: ${call.dispatched ?? "not recorded"}; reason: ${call.stopReason ?? "not recorded"}; ${call.error ?? ""}`,
+      );
     }
   }
   lines.push("");

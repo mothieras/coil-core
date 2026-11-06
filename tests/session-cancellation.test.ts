@@ -72,7 +72,7 @@ test(
       source: { type: "builtin" },
       handler: () => {
         entered.resolve();
-        return late.promise;
+        return late.promise.then((output) => ({ status: "completed" as const, output }));
       },
     });
     try {
