@@ -8,6 +8,7 @@ export type ProviderRequest = {
 };
 
 export type ProviderCallOptions = {
+  signal?: AbortSignal | undefined;
   maxTokens?: number | undefined;
   timeoutMs?: number | undefined;
 };

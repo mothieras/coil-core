@@ -1,53 +1,22 @@
-import { exec } from "node:child_process";
+import { startManagedProcess } from "./process.js";
 import { requireNonEmptyString } from "../input.js";
 import { isDangerousCommand } from "./shellSafety.js";
 import { builtinTool, type RegisteredTool } from "../types.js";
 
-type ExecErrorWithOutput = Error & {
-  code?: number | string;
-  stdout?: string;
-  stderr?: string;
-};
-
-function execAsync(
+async function runBash(
   command: string,
-  cwd: string,
-  timeoutMs: number,
-): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    exec(
-      command,
-      { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error) {
-          const err = error as unknown as ExecErrorWithOutput;
-          err.stdout = stdout;
-          err.stderr = stderr;
-          reject(err);
-          return;
-        }
-        resolve({ stdout, stderr });
-      },
-    );
-  });
-}
-
-async function runBash(command: string, workspaceRoot: string): Promise<string> {
+  workspaceRoot: string,
+  signal?: AbortSignal,
+): Promise<string> {
   if (isDangerousCommand(command)) {
     return "Error: Dangerous command blocked";
   }
 
-  try {
-    const r = await execAsync(command, workspaceRoot, 120_000);
-    const out = (r.stdout + r.stderr).trim();
-    return out ? out.slice(-50000) : "(no output)";
-  } catch (e) {
-    const err = e as ExecErrorWithOutput;
-    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`.trim();
-    if (out) return out.slice(-50000);
-    if (err.code === "ETIMEDOUT") return "Error: Timeout (120s)";
-    return `Error: ${err.message}`;
-  }
+  const result = await startManagedProcess(command, workspaceRoot, { signal, timeoutMs: 120_000 })
+    .done;
+  return result.code === 0
+    ? result.output
+    : `Error: Command exited ${result.code ?? result.signal}\n${result.output}`;
 }
 
 export function createBashTool(deps: { workspaceRoot: string }): RegisteredTool {
@@ -63,10 +32,10 @@ export function createBashTool(deps: { workspaceRoot: string }): RegisteredTool 
         required: ["command"],
       },
     },
-    (input) => {
+    (input, context) => {
       const command = requireNonEmptyString(input, "command", "bash tool");
       if ("error" in command) return command.error;
-      return runBash(command.value, deps.workspaceRoot);
+      return runBash(command.value, deps.workspaceRoot, context?.signal);
     },
   );
 }

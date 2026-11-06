@@ -129,7 +129,7 @@ function eventVisual(item: LogItemModel): EventVisual {
     return {
       marker: TUI_SYMBOLS.info,
       color: TUI_COLORS.muted,
-      label: "Session",
+      label: item.title === "run" ? "Run" : "Session",
       summary: item.detail,
     };
   }
@@ -144,19 +144,31 @@ function isExceptional(status: string | undefined): boolean {
     status === "permission_denied" ||
     status === "denied" ||
     status === "timeout" ||
-    status === "interrupted"
+    status === "interrupted" ||
+    status === "cancelled" ||
+    status === "unconfirmed"
   );
 }
 
 function colorForStatus(status: string | undefined): string {
-  if (status === "blocked" || status === "timeout" || status === "interrupted") {
+  if (
+    status === "blocked" ||
+    status === "timeout" ||
+    status === "interrupted" ||
+    status === "cancelled" ||
+    status === "unconfirmed"
+  ) {
     return TUI_COLORS.warning;
   }
   return isExceptional(status) ? TUI_COLORS.danger : TUI_COLORS.success;
 }
 
 function markerForStatus(status: string | undefined): string {
-  return status === "blocked" || status === "timeout" || status === "interrupted"
+  return status === "blocked" ||
+    status === "timeout" ||
+    status === "interrupted" ||
+    status === "cancelled" ||
+    status === "unconfirmed"
     ? TUI_SYMBOLS.warning
     : TUI_SYMBOLS.error;
 }

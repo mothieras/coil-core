@@ -1,6 +1,12 @@
 import crypto from "node:crypto";
 import type { Message } from "@earendil-works/pi-ai";
-import type { AgentKind, AgentRunStatus, AgentRunTrigger } from "../agent/run.js";
+import type {
+  AgentKind,
+  AgentRunStatus,
+  AgentRunTrigger,
+  RunCleanupResult,
+  RunStopSource,
+} from "../agent/run.js";
 import type { RuntimeLifecycleEvent } from "../agent/lifecycle.js";
 import type { ToolSource } from "../tools/types.js";
 
@@ -54,13 +60,23 @@ export type AgentRunProjection = {
   startedAt?: string | undefined;
   finishedAt?: string | undefined;
   stopReason?: string | null | undefined;
+  stopSource?: RunStopSource | undefined;
+  cleanup?: RunCleanupResult | undefined;
   resultSummary?: string | undefined;
   error?: string | undefined;
   messageCount?: number | undefined;
   toolCallCount?: number | undefined;
 };
 
-export type ToolCallStatus = "running" | "completed" | "blocked" | "permission_denied" | "error";
+export type ToolCallStatus =
+  | "running"
+  | "completed"
+  | "blocked"
+  | "permission_denied"
+  | "error"
+  | "cancelled"
+  | "timeout"
+  | "unconfirmed";
 
 export type ToolCallProjection = {
   id: string;

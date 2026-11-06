@@ -1,9 +1,17 @@
 import crypto from "node:crypto";
-import type { AgentKind, AgentRun, AgentRunStatus, AgentRunTrigger } from "./run.js";
+import type {
+  AgentKind,
+  AgentRun,
+  AgentRunStatus,
+  AgentRunTrigger,
+  RunCleanupResult,
+  RunStopSource,
+} from "./run.js";
 import type { ToolSource } from "../tools/types.js";
 
 export type RuntimeLifecycleEventType =
   | "agent_run_started"
+  | "agent_run_stopping"
   | "agent_run_finished"
   | "assistant_message_added"
   | "tool_started"
@@ -38,8 +46,15 @@ export type AgentRunStartedEvent = RuntimeLifecycleEventBase<"agent_run_started"
   trigger: AgentRunTrigger;
 };
 
+export type AgentRunStoppingEvent = RuntimeLifecycleEventBase<"agent_run_stopping"> & {
+  stopReason: "aborted" | "timeout";
+  stopSource: RunStopSource;
+};
+
 export type AgentRunFinishedEvent = RuntimeLifecycleEventBase<"agent_run_finished"> & {
-  status: Exclude<AgentRunStatus, "created" | "running">;
+  status: Exclude<AgentRunStatus, "created" | "running" | "stopping">;
+  stopSource?: RunStopSource | undefined;
+  cleanup?: RunCleanupResult | undefined;
   stopReason?: string | null | undefined;
   resultSummary?: string | undefined;
   error?: string | undefined;
@@ -66,7 +81,14 @@ export type ToolFinishedEvent = RuntimeLifecycleEventBase<"tool_finished"> & {
   toolCallId: string;
   toolName: string;
   source?: ToolSource | undefined;
-  status: "completed" | "blocked" | "permission_denied" | "error";
+  status:
+    | "completed"
+    | "blocked"
+    | "permission_denied"
+    | "error"
+    | "cancelled"
+    | "timeout"
+    | "unconfirmed";
   resultSummary?: string | undefined;
   error?: string | undefined;
   durationMs?: number | undefined;
@@ -110,6 +132,7 @@ export type CompactFinishedEvent = RuntimeLifecycleEventBase<"compact_finished">
 
 export type RuntimeLifecycleEvent =
   | AgentRunStartedEvent
+  | AgentRunStoppingEvent
   | AgentRunFinishedEvent
   | AssistantMessageAddedEvent
   | ToolStartedEvent

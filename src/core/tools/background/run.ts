@@ -18,10 +18,10 @@ export function createBackgroundRunTool(deps: {
         required: ["command"],
       },
     },
-    (input) => {
+    (input, context) => {
       const command = requireNonEmptyString(input, "command", "background_run");
       if ("error" in command) return command.error;
-      return deps.backgroundManager.run(command.value);
+      return deps.backgroundManager.run(command.value, context);
     },
   );
 }

@@ -20,7 +20,7 @@ export async function runTui(): Promise<void> {
   const bridge = createPermissionBridge();
   const checkPermission: CheckPermissionFn = createPermissionChecker(
     workspaceRoot,
-    (toolName, input, reason) => bridge.request(toolName, input, reason),
+    (toolName, input, reason, context) => bridge.request(toolName, input, reason, context),
   );
   const loadProviders = (): Promise<ToolProviderLoadResult[]> =>
     loadConfiguredMcpTools(workspaceRoot);

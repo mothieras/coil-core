@@ -1,3 +1,4 @@
+import { throwIfAborted } from "../loop/cancellation.js";
 import type {
   Api,
   AssistantMessage,
@@ -49,6 +50,7 @@ export function createPiAiProvider(deps: PiAiProviderDeps = {}): Provider {
       request: ProviderRequest,
       options?: ProviderCallOptions,
     ): Promise<AssistantMessage> {
+      throwIfAborted(options?.signal);
       const context: Context = {
         messages: request.messages,
         tools: request.tools,
@@ -65,6 +67,7 @@ export function createPiAiProvider(deps: PiAiProviderDeps = {}): Provider {
       };
       const callOptions: ProviderStreamOptions = {
         maxRetries: 0,
+        ...(options?.signal !== undefined ? { signal: options.signal } : {}),
         ...(options?.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
         ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
         ...(supportsFetchCapture(activeModel.api) ? { fetch: captureFetch } : {}),
@@ -73,10 +76,17 @@ export function createPiAiProvider(deps: PiAiProviderDeps = {}): Provider {
         },
       };
 
-      const message =
-        deps.complete !== undefined
-          ? await deps.complete(activeModel, context, callOptions)
-          : await getModelsCollection().complete(activeModel, context, callOptions);
+      let message: AssistantMessage;
+      try {
+        message =
+          deps.complete !== undefined
+            ? await deps.complete(activeModel, context, callOptions)
+            : await getModelsCollection().complete(activeModel, context, callOptions);
+      } catch (error) {
+        throwIfAborted(options?.signal);
+        throw error;
+      }
+      throwIfAborted(options?.signal);
 
       if (message.stopReason === "error" || message.stopReason === "aborted") {
         const status = captured?.status ?? httpStatusFromMessage(message.errorMessage);

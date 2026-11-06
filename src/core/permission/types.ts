@@ -8,6 +8,7 @@ export interface PermissionResult {
 }
 
 export type PermissionCheckContext = {
+  signal?: AbortSignal | undefined;
   permissionId: string;
   toolName: string;
   input: Record<string, unknown>;
@@ -27,4 +28,5 @@ export type AskUserFn = (
   toolName: string,
   input: Record<string, unknown>,
   reason: string,
+  context?: { signal?: AbortSignal | undefined },
 ) => Promise<boolean>;

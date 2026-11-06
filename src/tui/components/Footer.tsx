@@ -53,7 +53,11 @@ export function Footer(props: FooterProps): React.ReactElement {
         <PermissionModal request={permission} onDecision={onPermissionDecision} width={width} />
       ) : busy ? (
         <Box paddingX={1}>
-          <Text color={TUI_COLORS.muted}>Working, input paused.</Text>
+          <Text color={TUI_COLORS.muted}>
+            {snapshot.agentRuns.some((run) => run.status === "stopping")
+              ? "Stopping execution; waiting for confirmation."
+              : "Working, input paused."}
+          </Text>
         </Box>
       ) : (
         <Box
@@ -74,11 +78,15 @@ export function Footer(props: FooterProps): React.ReactElement {
         </Box>
       )}
       <StatusBar snapshot={snapshot} model={model} width={width} />
-      {!permission && (
+      {
         <Box paddingX={1}>
-          <Text color={TUI_COLORS.muted}>{footerHint(phase, busy, width)}</Text>
+          <Text color={TUI_COLORS.muted}>
+            {permission
+              ? "Ctrl+C cancel run · Ctrl+D close session"
+              : footerHint(phase, busy, width)}
+          </Text>
         </Box>
-      )}
+      }
     </Box>
   );
 }
@@ -96,14 +104,17 @@ export function formatTaskSummary(tasks: readonly TaskProjection[]): string | nu
 }
 
 function footerHint(phase: TurnPhase, busy: boolean, width: number): string {
+  if (phase === "closing") return "Stopping owned work and saving session.";
+  if (phase === "close-failed")
+    return "Session closed to new work. Inspect cleanup errors before exiting.";
   if (!busy) {
     return width < 72
       ? "Enter send · / commands · Ctrl+C quit"
       : "Enter send · ↑↓ history · / commands · Ctrl+C quit";
   }
   if (phase === "waiting-async") {
-    return "Esc stop waiting for async work · Ctrl+C available when idle";
+    return "Esc stop waiting · Ctrl+C cancel work · Ctrl+D close";
   }
-  if (phase === "auto-waking") return "Applying async results · Ctrl+C available when idle";
-  return "Operation running · Ctrl+C available when idle";
+  if (phase === "auto-waking") return "Applying results · Ctrl+C cancel · Ctrl+D close";
+  return "Ctrl+C cancel run · Ctrl+D close session";
 }

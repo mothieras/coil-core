@@ -28,6 +28,18 @@ export type AsyncWorkListener = (notification: AsyncWorkNotification) => void;
 export class AsyncWorkInbox {
   private readonly running = new Set<string>();
   private notifications: AsyncWorkNotification[] = [];
+  private readonly suppressed = new Set<string>();
+
+  suppress(kind: AsyncWorkKind, id: string): void {
+    const identity = key(kind, id);
+    this.suppressed.add(identity);
+    this.notifications = this.notifications.filter((n) => key(n.kind, n.id) !== identity);
+  }
+
+  suppressAll(): void {
+    for (const identity of this.running) this.suppressed.add(identity);
+    this.notifications = [];
+  }
   private readonly listeners = new Set<AsyncWorkListener>();
 
   register(notification: AsyncWorkNotification): void {
@@ -37,12 +49,13 @@ export class AsyncWorkInbox {
 
   settle(notification: AsyncWorkNotification): void {
     this.running.delete(key(notification.kind, notification.id));
-    this.notifications.push(notification);
+    if (!this.suppressed.has(key(notification.kind, notification.id)))
+      this.notifications.push(notification);
     this.emit(notification);
   }
 
   hasPending(): boolean {
-    return this.running.size > 0;
+    return [...this.running].some((identity) => !this.suppressed.has(identity));
   }
 
   drainNotifications(): AsyncWorkNotification[] {

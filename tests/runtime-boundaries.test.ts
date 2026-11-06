@@ -8,8 +8,8 @@ import type { Message, ToolResultMessage, UserMessage } from "@earendil-works/pi
 import { createAppContext } from "../src/core/app/context.js";
 import { pushTaggedUserMessage } from "../src/core/hooks/messageInjection.js";
 import { registerRuntimeHooks } from "../src/core/hooks/runtimeHooks.js";
-import { forkSubAgent } from "../src/core/tools/subagent/subagent.js";
-import { SubAgentRunner } from "../src/core/tools/subagent/subagentRunner.js";
+import { forkSubAgent } from "../src/core/agent/subagent.js";
+import { SubAgentRunner } from "../src/core/agent/subagentRunner.js";
 import { Agent, currentAgent } from "../src/core/agent/agent.js";
 import { hasPendingAsyncWork } from "../src/core/app/pendingWork.js";
 import { PROMPT_SECTIONS } from "../src/core/context/sections.js";
@@ -47,7 +47,10 @@ function createRuntime(workspaceRoot: string): ToolRuntime {
     workspaceRoot,
     taskManager,
     backgroundManager,
-    subAgentRunner,
+    startSubagent: (prompt, options) => {
+      const parent = currentAgent.getStore();
+      return parent ? subAgentRunner.run(parent, prompt, options) : "Error: no invoking agent";
+    },
   });
   registry.registerMany(builtin.tools);
   registry.recordDiagnostics(builtin.diagnostics);
@@ -111,7 +114,10 @@ test("loadBuiltinTools returns complete RegisteredTool entries", async () => {
       workspaceRoot: workspace,
       taskManager,
       backgroundManager,
-      subAgentRunner,
+      startSubagent: (prompt, options) => {
+        const parent = currentAgent.getStore();
+        return parent ? subAgentRunner.run(parent, prompt, options) : "Error: no invoking agent";
+      },
     });
 
     assert.deepEqual(builtin.diagnostics, []);
@@ -480,6 +486,18 @@ test("forkSubAgent puts role/name/workspace into the child's system prompt", () 
   assert.ok(firstMessage && firstMessage.role === "user");
   assert.equal(firstMessage.content, "review docs");
   assert.equal(typeof firstMessage.timestamp, "number");
+});
+
+test("forkSubAgent intersects the profile with its parent scope", () => {
+  const parent = new Agent({ toolRuntime: {} as never, allowedTools: ["read_file"] });
+  assert.deepEqual(
+    forkSubAgent(parent, "child", "task", { allowedTools: ["read_file", "bash"] }).allowedTools,
+    ["read_file"],
+  );
+  assert.deepEqual(
+    forkSubAgent(parent, "child2", "task", { allowedTools: ["bash"] }).allowedTools,
+    [],
+  );
 });
 
 test("forkSubAgent narrows allowedTools to the profile and never widens it", () => {

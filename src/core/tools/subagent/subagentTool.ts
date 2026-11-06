@@ -1,13 +1,8 @@
 import { optionalArrayOfStrings, optionalInteger, requireNonEmptyString } from "../input.js";
-import type { SubAgentRunOptions, SubAgentRunner } from "./subagentRunner.js";
-import type { CheckPermissionFn } from "../../permission/types.js";
+import type { SubagentStartOptions, StartSubagent } from "./types.js";
 import { builtinTool, type RegisteredTool } from "../types.js";
-import { currentAgent } from "../../agent/agent.js";
 
-export function createSubagentTool(deps: {
-  subAgentRunner: SubAgentRunner;
-  checkPermission?: CheckPermissionFn;
-}): RegisteredTool {
+export function createSubagentTool(deps: { startSubagent: StartSubagent }): RegisteredTool {
   return builtinTool(
     {
       name: "subagent",
@@ -48,15 +43,7 @@ export function createSubagentTool(deps: {
       const prompt = requireNonEmptyString(input, "prompt", "subagent tool");
       if ("error" in prompt) return prompt.error;
 
-      const parent = currentAgent.getStore();
-      if (!parent) {
-        return "Error: subagent can only be spawned from within an agent loop.";
-      }
-
-      const options: SubAgentRunOptions = {};
-      if (context?.sessionId !== undefined) options.sessionId = context.sessionId;
-      if (context?.runId !== undefined) options.parentRunId = context.runId;
-      if (context?.toolCallId !== undefined) options.parentToolCallId = context.toolCallId;
+      const options: SubagentStartOptions = {};
       const name = requireNonEmptyString(input, "name", "subagent tool");
       if (!("error" in name)) options.name = name.value;
       const role = requireNonEmptyString(input, "role", "subagent tool");
@@ -69,9 +56,7 @@ export function createSubagentTool(deps: {
       if (timeoutMs !== undefined) options.timeoutMs = timeoutMs;
       const allowedTools = optionalArrayOfStrings(input, "allowed_tools");
       if (allowedTools !== undefined) options.allowedTools = allowedTools;
-      if (deps.checkPermission) options.checkPermission = deps.checkPermission;
-
-      return deps.subAgentRunner.run(parent, prompt.value, options);
+      return deps.startSubagent(prompt.value, options, context);
     },
   );
 }

@@ -47,6 +47,7 @@ export class SessionRunner {
   }
 
   async runUserTurn(text: string): Promise<SessionUserTurnResult> {
+    this.agentRuntime.assertCanRun(this.leadAgent);
     const userMessage = createConversationMessage({
       sessionId: this.sessionId,
       role: "user",

@@ -3,3 +3,5 @@ export * from "./lifecycle.js";
 export * from "./lifecycleSummary.js";
 export * from "./run.js";
 export * from "./runtime.js";
+export * from "./subagent.js";
+export * from "./subagentRunner.js";

@@ -74,6 +74,7 @@ function sessionApi(overrides: Partial<UseSessionApi> = {}): UseSessionApi {
     submit: () => {},
     decide: () => {},
     interrupt: () => {},
+    cancel: () => {},
     quit: () => {},
     busy: false,
     ...overrides,
@@ -263,12 +264,16 @@ test("PermissionModal treats Escape as deny", async () => {
 test("App invokes only supported interrupt and quit paths", async () => {
   let interrupts = 0;
   let quits = 0;
+  let cancels = 0;
   const base = sessionApi({
     interrupt: () => {
       interrupts += 1;
     },
     quit: () => {
       quits += 1;
+    },
+    cancel: () => {
+      cancels += 1;
     },
   });
   const send = async (session: UseSessionApi, key: string): Promise<void> => {
@@ -288,6 +293,9 @@ test("App invokes only supported interrupt and quit paths", async () => {
   await send(base, "\x03");
   await send({ ...base, busy: true, phase: "thinking" }, "\x03");
   assert.equal(quits, 1, "Ctrl+C quits only while idle");
+  assert.equal(cancels, 1, "Ctrl+C cancels a foreground turn");
+  await send({ ...base, busy: true, phase: "thinking" }, "\x04");
+  assert.equal(quits, 2, "Ctrl+D closes even while running");
 });
 
 test("App renders the transcript and composer together", () => {

@@ -37,5 +37,9 @@ export type McpToolResult = {
 
 export interface McpClient {
   listTools(): Promise<McpToolSchema[]>;
-  callTool(name: string, input: unknown): Promise<McpToolResult>;
+  callTool(
+    name: string,
+    input: unknown,
+    options?: { signal?: AbortSignal | undefined },
+  ): Promise<McpToolResult>;
 }

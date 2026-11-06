@@ -1,4 +1,5 @@
 import type {
+  AgentRunProjection,
   BackgroundCommandProjection,
   ConversationMessage,
   McpServerProjection,
@@ -21,6 +22,8 @@ export type SessionViewEventBase<Type extends string> = {
   timestamp: string;
   sourceEventId: string;
 };
+
+export type RunChangedViewEvent = SessionViewEventBase<"run_changed"> & { run: AgentRunProjection };
 
 export type SessionStartedViewEvent = SessionViewEventBase<"session_started"> & {
   mode: "created" | "resumed";
@@ -123,6 +126,7 @@ export type McpServerViewEvent = SessionViewEventBase<
 };
 
 export type SessionViewEvent =
+  | RunChangedViewEvent
   | SessionStartedViewEvent
   | SessionFinishedViewEvent
   | SessionTitledViewEvent
@@ -285,7 +289,11 @@ function runtimeLifecycleViewEvents(
         },
       ];
     case "agent_run_started":
-    case "agent_run_finished":
+    case "agent_run_stopping":
+    case "agent_run_finished": {
+      const run = snapshot.agentRuns.find((run) => run.id === runtimeEvent.runId);
+      return run ? [{ ...base(event, "run_changed"), run }] : [];
+    }
     case "assistant_message_added":
       return [];
   }

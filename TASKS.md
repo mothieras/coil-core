@@ -1,8 +1,8 @@
 # Agent runtime 架构优化与可靠性打磨任务清单
 
-状态：M0 已完成，M1–M5 未开始。依据：[SPEC.md](SPEC.md)、[PLAN.md](PLAN.md)。代码基线：`54551bc`。
+状态：M0、M1 已完成，M2–M5 未开始。依据：[SPEC.md](SPEC.md)、[PLAN.md](PLAN.md)。代码基线：`54551bc`。
 
-本次用户授权完成 M0，并允许最多一个并行子代理；实际使用一个只读子代理提供资源路径证据。SPEC 第 9 节默认行为及限定兼容演进已由用户确认。本次不授权 M1 实现、提交或发布，后续任务仍按依赖推进。
+用户本次明确授权完成 M1（T005–T020），未授权提交或发布；本轮串行实现，未使用子代理。SPEC 第 9 节沿用 M0 已确认的默认行为及限定兼容演进。下方 M0 的授权和基线描述为历史记录：该次只完成只读审查，使用一个获准的只读子代理。后续 M2–M5 不在本次范围内。
 
 ## 1. 使用约定
 
@@ -72,101 +72,117 @@ pnpm format:check
 
 ## 3. M1：生命周期与全链路取消
 
-- [ ] **T005 建立受保护的运行状态转换**
+- [x] **T005 建立受保护的运行状态转换**
   - 来源：PLAN M1-01；SPEC L1、L2、A1；V01、V04。依赖：T004。
   - 范围：`src/core/agent/run.ts`、`src/core/agent/runtime.ts`、`src/core/loop/options.ts`。
   - 完成条件：分开可序列化记录与控制句柄，建立权威终态决策；覆盖完成、取消、超时、失败的先后顺序及重复调用；取消被接受后迟到结果不能改成成功。
   - 验证：扩展 `tests/agent-runtime.test.ts`；显式控制竞争顺序，不以任意 sleep 推断行为。
+  - 证据：`tests/run-transitions.test.ts`、`tests/agent-runtime.test.ts` 覆盖先完成/先取消、重复转换、迟到响应、并发准入和直接 loop 与 runtime 的同 Agent 所有权。运行记录只含可序列化字段，控制表和完成句柄留在 runtime；聚焦测试及阶段全量检查通过。
 
-- [ ] **T006 同步结束原因、事件、投影与报告**
+- [x] **T006 同步结束原因、事件、投影与报告**
   - 来源：PLAN M1-01；SPEC L1、L2；V01、V04。依赖：T005。
   - 范围：`src/core/agent/lifecycle.ts`、`src/core/loop/response.ts`、session 类型、事件、投影与 `src/core/session/report.ts`。
   - 完成条件：错误、超时、执行限制不误报成功；同一存活 run 只有一个最终运行事件，消费者采用同一语义；删除重复终态写入路径。
   - 验证：`tests/runtime-lifecycle.test.ts`、`tests/session-projection.test.ts`、`tests/session-report.test.ts`，同时保留正常路径回归。
+  - 证据：runtime 成为唯一 `agent_run_finished` 生产者；删除 controller/子代理的手写终态路径。停止中及 cleanup 经 lifecycle → projection → view/report 同步；`tests/session-cancellation.test.ts`、`tests/session-report.test.ts` 和既有 lifecycle/projection 回归通过。旧 cleanup 缺失显示未记录。
 
-- [ ] **T007 将取消传递到 pi-ai adapter**
+- [x] **T007 将取消传递到 pi-ai adapter**
   - 来源：PLAN M1-02；SPEC L3、L4；V02。依赖：T006。
   - 范围：`src/core/providers/types.ts`、`src/core/providers/pi.ts`、`src/core/providers/errors.ts`、`src/core/loop/recovery.ts`。
   - 完成条件：核对已安装 SDK 的取消选项，贯通 `AbortSignal`；主动取消与请求失败、超时分开，不进入网络恢复；保留 HTTP 状态、`retry-after` 和单一重试预算。
   - 验证：扩展 `tests/pi-provider.test.ts`、`tests/error-recovery.test.ts`，包含调用前已取消及请求途中取消。
+  - 证据：核对本地 pi-ai 1.4.0 `dist/types.d.ts` 的 signal/timeoutMs/maxRetries；adapter 转发 signal、保留 maxRetries=0。`tests/pi-provider.test.ts` 的派发前取消、途中取消及 HTTP status/retry-after 用例，连同 `tests/error-recovery.test.ts` 通过。
 
-- [ ] **T008 验证真实 adapter 的请求取消**
+- [x] **T008 验证真实 adapter 的请求取消**
   - 来源：PLAN M1-02；SPEC 证据层级；V02。依赖：T007。
   - 范围：`tests/pi-provider.test.ts` 或同目录聚焦集成测试、本地 HTTP fixture。
   - 完成条件：通过真实 pi-ai adapter 连接受控本地服务，取消请求并观测连接/请求结束；验证没有后续重试，完整清理服务和连接。
   - 验证：无需模型凭据；不得用替换 `Provider` 或仅断言选项中存在 signal 代替实际消费者验证。不得将本地证据称为线上厂商验证。
+  - 证据：`tests/pi-provider.test.ts` 的真实 adapter 测试连接受控本地 HTTP server，握手后 abort，观察 server response close 且请求数为 1；finally 关闭全部连接。无真实模型凭据或线上厂商调用，不能据此声称线上验证。
 
-- [ ] **T009 取消退避、deadline 与权限等待**
+- [x] **T009 取消退避、deadline 与权限等待**
   - 来源：PLAN M1-02；SPEC L3；V03、V04。依赖：T008。
   - 范围：`src/core/loop/loop.ts`、`src/core/loop/deadline.ts`、`src/core/loop/recovery.ts`、`src/core/permission/`。
   - 完成条件：等待可取消、定时器与监听器可清理；实际派发前复查信号；迟到允许不执行工具；超时走清理但保持独立结束原因。
   - 验证：`tests/agent.test.ts`、`tests/error-recovery.test.ts`；计数证明取消后模型、工具、重试调用数不再增加。
+  - 证据：`tests/cancellation-waits.test.ts` 覆盖退避取消后调用数不增加、真实 deadline signal 和 timeout 原因锁定、权限队列定向移除；`tests/tool-cancellation.test.ts` 验证迟到 allow 不派发。可取消等待清理 timer/listener，删除旧的只竞争 Promise 的 deadline 等待函数。
 
-- [ ] **T010 纳入压缩和辅助模型请求**
+- [x] **T010 纳入压缩和辅助模型请求**
   - 来源：PLAN M1-02；SPEC L3；V03。依赖：T009。
   - 范围：`src/core/providers/text.ts`、`src/core/context/compact.ts`、`src/core/session/controller.ts`、`src/core/session/commands/`。
   - 完成条件：运行内压缩属于对应取消范围；自动命名、手动压缩和 `/ping` 的所有权明确，关闭时不遗留请求；迟到结果不修改已停止工作拥有的消息状态。
   - 验证：压缩相关测试与 `tests/session-controller.test.ts`；比较取消前后消息内容，证明没有迟到覆写。
+  - 证据：压缩在请求与 splice 前检查 signal 和消息归属；session scope 管理命名、手动压缩和 ping。`tests/cancellation-waits.test.ts`、`tests/session-cancellation.test.ts` 比较取消前后消息，并验证三类辅助请求关闭时收到信号；既有压缩测试保持通过。
 
-- [ ] **T011 建立最小工具取消契约**
+- [x] **T011 建立最小工具取消契约**
   - 来源：PLAN M1-03；SPEC L3、L4、T3；V06。依赖：T010。
   - 范围：`src/core/tools/input.ts`、`src/core/tools/runtime.ts`、`src/core/loop/loop.ts`。
   - 完成条件：信号进入 handler；取消、超时等控制结果不被通用 catch 吞成字符串；只引入 M1 所需分类，不提前重写所有工具错误。
   - 验证：拟新增 `tests/tool-cancellation.test.ts`；覆盖协作停止、handler 迟到完成和未派发调用。
+  - 证据：新增公开 `ExecutionStoppedError`，保留字符串成功返回，signal 到达 handler，控制异常穿过通用 catch。`tests/tool-cancellation.test.ts` 覆盖协作停止、在途迟到结果、权限前未派发及未确认时的 Agent 准入锁；全量检查通过。
 
-- [ ] **T012 实现前台与后台进程的实际清理**
+- [x] **T012 实现前台与后台进程的实际清理**
   - 来源：PLAN M1-03；SPEC L4；V05。依赖：T011。
   - 范围：`src/core/tools/file/bash.ts`、`src/core/tools/background/backgroundManager.ts`；拟新增 `tests/process-cancellation.test.ts`。
   - 完成条件：保存句柄，按已决策策略终止、有限等待、必要时升级终止；以实际退出确认收尾；统一重复清理处理，不建立通用调度框架。
   - 验证：真实进程及受管后代 fixture；分别覆盖主动取消、超时、重复取消和终止失败。按 macOS/Linux 实际结果记录支持范围，断言失败也清理 fixture。
+  - 证据：共享 `src/core/tools/file/process.ts` 管理私有进程组、TERM/KILL、实际退出和重复停止。`tests/process-cancellation.test.ts` 真实验证 shell/后代退出、忽略 TERM 后升级、终止错误未确认；`tests/owned-work-cancellation.test.ts` 覆盖后台清理。macOS arm64/Node 24.21.0 通过；Linux 未执行，Windows 不声明进程树保证。Darwin 退出期间 EPERM 不视为退出，继续等待 ESRCH。
 
-- [ ] **T013 处理不可取消工具与共享 MCP 请求**
+- [x] **T013 处理不可取消工具与共享 MCP 请求**
   - 来源：PLAN M1-03；SPEC L4、C2；V06。依赖：T012。
   - 范围：`src/core/tools/mcp/`、工具运行时、取消测试。
   - 完成条件：不支持取消时返回停止未确认/结果未知，阻止后续派发；不把 Promise 竞争当停止证明；单请求取消不关闭共享连接。
   - 验证：不可取消 handler 的受控迟到结果，以及本地 MCP fixture 中另一在途调用可继续完成。
+  - 证据：`tests/mcp-cancellation.test.ts` 使用真实 TS stdio fixture：取消第一调用返回 unconfirmed，共享连接上的第二调用仍成功，迟到第一结果不改消息，close 后 server PID 消失。不可取消 handler 由 `tests/tool-cancellation.test.ts` 保留实际完成/占用跟踪；未用 Promise 竞争声称远端停止。
 
-- [ ] **T014 收尾取消后的 tool-call 上下文**
+- [x] **T014 收尾取消后的 tool-call 上下文**
   - 来源：PLAN M1-03；SPEC T4；V08 的取消部分。依赖：T013。
   - 范围：`src/core/loop/loop.ts`、消息构建与生命周期映射。
   - 完成条件：批次中未派发工具不执行；按 M1 决策补充真实取消结果或安全整理消息；下一次模型调用上下文合法，无伪造成功结果。
   - 验证：`tests/agent.test.ts`、工具取消测试；检查完整消息配对、执行计数及继续对话路径。
+  - 证据：取消批次保留已有结果，对在途调用记录结果未知，对未派发调用补 isError 的未执行结果，并按 toolCallId 配对。`tests/tool-cancellation.test.ts` 检查三调用批次保留首个成功结果、取消第二个且不派发第三个，并验证完整配对、迟到结果隔离和下一次对话；阶段全量回归通过。
 
-- [ ] **T015 调整子代理协调职责与依赖方向**
+- [x] **T015 调整子代理协调职责与依赖方向**
   - 来源：PLAN M1-04；SPEC A3。依赖：T014。
   - 范围：`src/core/tools/subagent/`、`src/core/app/context.ts`、`src/core/tools/builtins.ts`、agent 及相关 barrel。
   - 完成条件：按 M0 结论移动依赖 Agent 的协调逻辑；工具只依赖注入的启动能力和中立参数；唯一 ALS 绑定点保持不变，loop 无子代理特判；同步调用方后删除旧路径。
   - 验证：`tests/runtime-boundaries.test.ts`、`tests/builtin-tool-ownership.test.ts`、`tests/subagent-runner.test.ts`；补 import 方向检查，验证工具权限只收窄。
+  - 证据：fork/runner 已迁至 `src/core/agent/subagent.ts`、`subagentRunner.ts`；tools 只接受 `StartSubagent`，app 解析父身份。旧协调路径删除，所有仓内调用与 barrel 同步。`tests/builtin-tool-ownership.test.ts` 增加真实 import 方向检查；`tests/runtime-boundaries.test.ts` 验证固定 profile ∩ 父范围 ∩ 请求范围，只有 agentLoop 绑定 ALS。
 
-- [ ] **T016 贯通后代工作归属、取消与基本容量保护**
+- [x] **T016 贯通后代工作归属、取消与基本容量保护**
   - 来源：PLAN M1-04；SPEC L5、C1、C2、C4；V14 基本路径。依赖：T015。
   - 范围：迁移后的子代理协调模块、后台工作、`src/core/async/asyncWorkInbox.ts`、session 消费者。
   - 完成条件：记录 session/run/父调用归属和完成句柄；取消 run 级联活动后代，正常完成不取消显式异步工作；取消后的结果不唤醒；实际未退出的工作不提前释放槽位。
   - 验证：子代理和 session/controller 测试；同时验证正常完成、显式取消、关闭三种语义，不能只检查记录字段。
+  - 证据：runtime 跟踪父 run、后台完成句柄；取消活动后代，正常完成保留显式异步工作，取消通知不进入唤醒队列。`tests/owned-work-cancellation.test.ts` 以两个真实进程组证明归属隔离；`tests/subagent-runner.test.ts` 验证未确认 child 不释放容量、实际完成后恢复；`tests/session-cancellation.test.ts` 验证 completed 父仅取消后代且原终态不变。
 
-- [ ] **T017 提供 headless/controller 取消与幂等关闭入口**
+- [x] **T017 提供 headless/controller 取消与幂等关闭入口**
   - 来源：PLAN M1-05；SPEC L5；V01–V06 消费者路径。依赖：T016。
   - 范围：`src/core/session/controller.ts`、`src/core/session/runner.ts`、`src/core/index.ts`、view events。
   - 完成条件：区分停止等待、取消 run、关闭 session；关闭先拒绝新工作，有限收尾，再关闭共享连接并保存；保留重要清理错误，不因 finally 覆盖原始失败。
   - 验证：`tests/session-controller.test.ts`；通过公开入口检查重复关闭、关闭期间请求、停止未确认与多个清理失败，不访问内部 Map 驱动行为。
+  - 证据：公开 controller.cancelRun、runtime.cancelRun 和幂等 controller.close 已接通；关闭禁止新工作、并行停止、共享预算、关闭 providers 后另给保存预算，聚合重要错误。`tests/session-cancellation.test.ts` 覆盖重复 close 同 Promise、关闭中请求拒绝、多个清理/保存失败、5 秒未确认工具和迟到消息隔离；既有 controller 回归通过。
 
-- [ ] **T018 接入现有 TUI 的取消和关闭状态**
+- [x] **T018 接入现有 TUI 的取消和关闭状态**
   - 来源：PLAN M1-05；SPEC G6、L5。依赖：T017。
   - 范围：`src/tui/useSession.ts`、`src/tui/sessionActions.ts`、`src/tui/permissionBridge.ts`、`src/tui/components/App.tsx` 和相关展示组件。
   - 完成条件：仅使用 controller/view events；明确显示正在停止、已停止、停止未确认和关闭失败；保留停止等待的独立行为，不重设计界面。
   - 验证：TUI actions、permission bridge、组件测试及实际终端检查；覆盖权限、运行和等待阶段、80 列及无颜色呈现。
+  - 证据：Ctrl+C 运行/权限阶段取消、Esc 异步阶段仅停止等待、Ctrl+D 关闭；仅调用 controller/view events。组件、actions 和权限测试通过。真实 Ink fixture `tests/fixtures/tui-cancellation.ts` 在 macOS 80×24 PTY、NO_COLOR=1 下驱动全部按键：正常关闭退出 0，实际检查后台 PID 消失；未知工具/关闭失败保持明确提示并用 fixture SIGTERM 收尾，无遗留进程。已检查实际终端文本渲染，非仅组件快照；机械 UI 检查返回空 findings。
 
-- [ ] **T019 提供第一版取消演示与使用说明**
+- [x] **T019 提供第一版取消演示与使用说明**
   - 来源：PLAN M1-06；SPEC G6。依赖：T018。
   - 范围：拟新增 `examples/cancel-run.ts`、`README.md`。
   - 完成条件：无凭据演示启动受控工作、取消、退出确认；说明范围、平台、停止未确认和不回滚副作用；临时 workspace 不影响用户文件。
   - 验证：实际执行示例并核对输出；不宣称 M3/M4 尚未实现的保证。
+  - 证据：新增 `examples/cancel-run.ts`，通过包名 `coil-core` 消费 dist 公共导出。实际执行 `pnpm build && pnpm exec tsx examples/cancel-run.ts` 退出 0，输出 interrupted/aborted/confirmed 并以 ESRCH 验证真实 PID 已退出。README 说明范围、预算、平台证据、未确认状态、不回滚及工具装配迁移；临时 workspace 已回收。
 
-- [ ] **T020 M1 阶段验收**
+- [x] **T020 M1 阶段验收**
   - 来源：PLAN M1-06；SPEC V01、V02、V03、V04、V05、V06。
   - 依赖：T005、T006、T007、T008、T009、T010、T011、T012、T013、T014、T015、T016、T017、T018、T019。
   - 完成条件：全部 M1 契约和实际消费者证据齐备，执行通用阶段检查，复查 diff；不存在端到端取消依赖 M2/M4 才能工作的情况。
   - 验证：记录各 V 编号对应测试及平台结果，更新 PLAN M1 汇总。至此可形成独立求职展示版本。
+  - 证据：V01/V04：run-transitions、agent-runtime、session-cancellation；V02：pi-provider 本地 HTTP；V03：cancellation-waits、session-cancellation；V05：process-cancellation、owned-work-cancellation、subagent-runner；V06：tool-cancellation、mcp-cancellation、session-cancellation。V08 取消配对与 V14 基本归属亦通过。最终 `pnpm test` 269 通过、0 失败/跳过/取消；`pnpm exec tsc --noEmit`、`pnpm typecheck:tests`、`pnpm lint`、`pnpm format:check`、`pnpm build`、构建消费示例均退出 0。已审查最终 diff、实际 TTY 渲染和文档；无提交/发布。Linux/Windows、线上厂商和 M3/M4 的完整保证未验证或未实现，不纳入能力声明。
 
 ## 4. M2：工具执行契约
 
@@ -364,10 +380,10 @@ pnpm format:check
 | 阶段 | 任务范围  | 出口 | 当前状态 |
 | ---- | --------- | ---- | -------- |
 | M0   | T001–T004 | T004 | 已完成   |
-| M1   | T005–T020 | T020 | 未开始   |
+| M1   | T005–T020 | T020 | 已完成   |
 | M2   | T021–T026 | T026 | 未开始   |
 | M3   | T027–T036 | T036 | 未开始   |
 | M4   | T037–T043 | T043 | 未开始   |
 | M5   | T044–T047 | T047 | 未开始   |
 
-M0 的 T001–T004 已完成，证据见各任务及 SPEC 第 3、9 节。下一项为 T005；开始 M1 需获得该阶段实施授权。本次未新增生产代码或测试，未提交、推送或发布。
+M0 的 T001–T004、M1 的 T005–T020 已完成。M1 平台与消费者证据见上述任务，PLAN 已同步阶段出口；下一项为 M2 的 T021，需另行授权该阶段。未提交、推送或发布。

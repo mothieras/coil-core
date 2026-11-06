@@ -1,4 +1,5 @@
 import path from "node:path";
+import { throwIfAborted, waitWithSignal } from "../loop/cancellation.js";
 import type { AskUserFn, CheckPermissionFn } from "./types.js";
 
 // ── Gate 1: Hard deny list ──
@@ -75,6 +76,7 @@ function checkRules(
 
 export function createPermissionChecker(workspace: string, askUser: AskUserFn): CheckPermissionFn {
   return async (context) => {
+    throwIfAborted(context.signal);
     const { toolName, input } = context;
     // Gate 1: hard deny
     if (toolName === "bash") {
@@ -88,7 +90,11 @@ export function createPermissionChecker(workspace: string, askUser: AskUserFn): 
     const ruleReason = checkRules(toolName, input, workspace);
     if (ruleReason) {
       context.emitPermissionRequested?.(ruleReason);
-      const allowed = await askUser(toolName, input, ruleReason);
+      throwIfAborted(context.signal);
+      const allowed = await waitWithSignal(
+        askUser(toolName, input, ruleReason, { signal: context.signal }),
+        context.signal,
+      );
       if (!allowed) {
         return { allowed: false, requested: true, reason: `User denied: ${ruleReason}` };
       }

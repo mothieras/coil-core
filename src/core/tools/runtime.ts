@@ -1,3 +1,4 @@
+import { ExecutionStoppedError, throwIfAborted } from "../loop/cancellation.js";
 import type { BackgroundManager } from "./background/backgroundManager.js";
 import type { TaskManager } from "./task/taskManager.js";
 import type { ToolInput, ToolInvocationContext } from "./input.js";
@@ -61,11 +62,12 @@ export class ToolRuntime {
     return list;
   }
 
-  interruptRunningBackgroundTasks(): void {
-    this.bg.interruptRunning();
+  cancelBackgroundTasks(deadlineAt?: number) {
+    return this.bg.cancelAll(deadlineAt);
   }
 
   async invokeTool(name: string, input: unknown, context?: ToolInvocationContext): Promise<string> {
+    throwIfAborted(context?.signal);
     const handler = this.registry.getHandler(name);
     if (!handler) {
       const diagnostic = this.registry.explainUnavailable(name);
@@ -76,8 +78,13 @@ export class ToolRuntime {
     const normalizedInput = typeof input === "object" && input !== null ? (input as ToolInput) : {};
 
     try {
-      return await handler(normalizedInput, context);
+      throwIfAborted(context?.signal);
+      const result = await handler(normalizedInput, context);
+      throwIfAborted(context?.signal);
+      return result;
     } catch (error) {
+      if (error instanceof ExecutionStoppedError) throw error;
+      if (context?.signal?.aborted) throw error;
       return formatToolExecutionError(error);
     }
   }

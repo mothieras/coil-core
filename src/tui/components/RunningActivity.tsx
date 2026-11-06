@@ -12,6 +12,8 @@ const PHASE_LABEL: Record<TurnPhase, string> = {
   "waiting-async": "Waiting for async work",
   "auto-waking": "Resuming with async results",
   idle: "",
+  closing: "Closing session",
+  "close-failed": "Session close failed",
 };
 
 type ActivityRow = { id: string; marker: string; label: string; summary?: string | undefined };

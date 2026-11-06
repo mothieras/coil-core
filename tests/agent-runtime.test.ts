@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Agent } from "../src/core/agent/agent.js";
 import { AgentRuntime } from "../src/core/agent/runtime.js";
+import { agentLoop } from "../src/core/loop/loop.js";
 import { createAgentRun } from "../src/core/agent/run.js";
 import { createRuntimeLifecycleCollector } from "../src/core/agent/lifecycle.js";
 import { HookBus } from "../src/core/hooks/hookBus.js";
@@ -22,6 +23,85 @@ function emptyRuntime() {
     invokeTool: async () => "",
   } as never;
 }
+
+test("runtime cancellation wins a late provider response and emits one final event", async () => {
+  const entered = Promise.withResolvers<void>();
+  const response = Promise.withResolvers<AssistantMessage>();
+  const collector = createRuntimeLifecycleCollector();
+  const runtime = new AgentRuntime(collector);
+  const agent = new Agent({
+    toolRuntime: emptyRuntime(),
+    provider: fakeProvider(() => {
+      entered.resolve();
+      return response.promise;
+    }),
+  });
+  const run = createAgentRun({
+    agentId: "lead",
+    agentKind: "lead",
+    trigger: { type: "user_message" },
+  });
+  const running = runtime.run(agent, run);
+  await entered.promise;
+  const stopping = runtime.cancelRun(run.id);
+  assert.equal(run.status, "stopping");
+  const repeated = runtime.cancelRun(run.id);
+  response.resolve(textResponse("late success"));
+  assert.equal((await running).result.stopReason, "aborted");
+  assert.deepEqual(await repeated, await stopping);
+  assert.equal(run.status, "interrupted");
+  assert.equal(run.cleanup?.status, "confirmed");
+  assert.equal(agent.messages.length, 0);
+  assert.equal(collector.events.filter((e) => e.type === "agent_run_finished").length, 1);
+  assert.equal((await runtime.cancelRun(run.id)).status, "noop");
+  assert.equal((await runtime.cancelRun("missing")).status, "unknown");
+});
+
+test("runtime rejects concurrent mutation of the same Agent", async () => {
+  const response = Promise.withResolvers<AssistantMessage>();
+  const entered = Promise.withResolvers<void>();
+  const runtime = new AgentRuntime();
+  const agent = new Agent({
+    toolRuntime: emptyRuntime(),
+    provider: fakeProvider(() => {
+      entered.resolve();
+      return response.promise;
+    }),
+  });
+  const makeRun = () =>
+    createAgentRun({ agentId: "lead", agentKind: "lead", trigger: { type: "user_message" } });
+  const first = runtime.run(agent, makeRun());
+  await entered.promise;
+  await assert.rejects(runtime.run(agent, makeRun()), /active run/);
+  response.resolve(textResponse("done"));
+  await first;
+});
+
+test("direct loops share Agent ownership with managed runs and honor pre-aborted signals", async () => {
+  const response = Promise.withResolvers<AssistantMessage>();
+  const entered = Promise.withResolvers<void>();
+  const abort = new AbortController();
+  const agent = new Agent({
+    toolRuntime: emptyRuntime(),
+    provider: fakeProvider(() => {
+      entered.resolve();
+      return response.promise;
+    }),
+  });
+  const direct = agentLoop(agent, { signal: abort.signal });
+  await entered.promise;
+  const run = createAgentRun({
+    agentId: "lead",
+    agentKind: "lead",
+    trigger: { type: "user_message" },
+  });
+  await assert.rejects(new AgentRuntime().run(agent, run), /active run/);
+  abort.abort();
+  response.resolve(textResponse("late"));
+  assert.equal((await direct).stopReason, "aborted");
+  assert.equal(agent.messages.length, 0);
+  assert.equal((await agentLoop(agent, { signal: abort.signal })).stopReason, "aborted");
+});
 
 test("AgentRuntime marks an AgentRun completed", async () => {
   const agent = new Agent({

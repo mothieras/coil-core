@@ -51,6 +51,49 @@ const result = await agentLoop(agent, {});
 
 See `examples/` for a runnable one-shot agent and a custom-tool registration demo.
 
+## 取消运行与关闭会话
+
+无凭据演示使用构建后的公共导出、scripted provider 和真实本地进程。所有文件都写入临时 workspace：
+
+```bash
+pnpm build
+pnpm exec tsx examples/cancel-run.ts
+```
+
+预期输出包含 `run=interrupted, reason=aborted, cleanup=confirmed`，并实际检查进程 PID 已退出。
+
+需要按 run id 取消时，使用 app 的同一个 runtime；自建 runtime 可通过 `createAppContext(root, { agentRuntime })` 注入。这让主运行、子代理和后台进程共享工作归属：
+
+```ts
+import { createAgentRun } from "coil-core";
+
+// agent 使用上文 app 的 toolRuntime；provider 可由 host 注入。
+const run = createAgentRun({
+  agentId: "lead",
+  agentKind: "lead",
+  trigger: { type: "user_message" },
+});
+const running = app.agentRuntime.run(agent, run); // 可选第三参数：{ signal }
+const cancellation = await app.agentRuntime.cancelRun(run.id);
+await running;
+console.log(cancellation.status, cancellation.cleanup);
+```
+
+- `cancelRun` 返回 `accepted`、`noop`、`descendants_only` 或 `unknown`。正常完成的父 run 保持原终态；之后取消它只停止仍活动的所属后代。重复请求不会重启清理或延长预算。
+- `cleanup.status` 区分 `not_needed`、`confirmed` 和 `unconfirmed`。`unconfirmed` 表示仍有资源或结果无法确认，不代表执行已停止；详情在 `resources` 和 `errors`。旧会话缺少该字段时只能视为未记录。
+- `SessionController.cancelRun(id?)` 默认取消最近的主运行及其活动后代。`waitForAsyncWork({ shouldStop })` 仅停止等待，不取消工作。`close()` 拒绝新工作，停止全部所属工作和辅助请求，关闭共享连接，然后保存。重复关闭复用同一个 Promise；多个重要失败通过 `AggregateError.errors` 保留。
+- 资源清理共享 5 秒预算；保存另有 5 秒预算。保存超时意味着保存未确认，不能推断文件系统操作已停止，也不自动重试。同步阻塞事件循环的自定义工具无法被抢占。
+- 自定义 `Provider.generate`、工具 handler 和权限回调接收可选 `signal`。工具仍返回字符串；取消等控制结果使用公开的 `ExecutionStoppedError`，不能转换成普通成功文本。忽略信号的操作保留实际完成跟踪；它真正结束前，同一 Agent 不能进入新运行。
+- 单个 MCP 请求取消不会关闭共享 server。远端操作不能证明已停止时保守报告未确认；其迟到结果不再改写活动消息。session 关闭才释放共享 MCP client。
+- 前台和后台 shell 使用引擎创建的独立进程组，先 TERM，最多等 2 秒，再 KILL，最多等 1 秒，受总预算限制。当前已在 **macOS arm64 / Node 24** 验证进程及受管后代退出；Linux 是现有 CI 的验证目标，本轮尚无 Linux 执行证据。Windows 不承诺进程树清理。
+- 不保证终止自行脱离进程组的后代或远端副作用，**取消不会回滚已经写入的文件、发出的请求或其他副作用**。本阶段也不承诺崩溃后的事务恢复或跨恢复的结果恰好交付一次。
+
+TUI 保持现有布局：运行或权限等待时按 **Ctrl+C** 取消运行；异步等待时按 **Esc** 只停止等待，按 **Ctrl+C** 取消所属工作；**Ctrl+D** 关闭整个 session。空闲时 Ctrl+C 仍为退出。界面分别显示正在停止、已停止、停止未确认和关闭失败，不依赖颜色区分。
+
+### 自定义工具装配迁移
+
+`BuiltinServices`、`loadBuiltinTools` 和 `createSubagentTools` 不再接收 `subAgentRunner/checkPermission`，改为注入 `startSubagent(prompt, options, context)`。使用 `createAppContext` 的调用者无需自行装配。自定义 host 应在 agent/app 层解析父身份并继承权限；工具目录只解析中立输入。协调类型 `SubAgentRunner` 与 `forkSubAgent` 已移到 agent 模块并通过 core 导出；旧 tools 深路径已删除。子代理工具范围取固定 profile、父范围和请求范围的交集。
+
 ## Architecture
 
 ```

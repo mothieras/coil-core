@@ -8,6 +8,34 @@ function snapshotWith(overrides: Partial<SessionSnapshot>): SessionSnapshot {
   return { ...createEmptySessionSnapshot(), ...overrides };
 }
 
+test("report distinguishes timeout, unknown cleanup and legacy missing cleanup", () => {
+  const base = {
+    sessionId: "s",
+    agentId: "lead",
+    agentKind: "lead" as const,
+    trigger: { type: "user_message" as const },
+  };
+  const report = buildSessionReport(
+    snapshotWith({
+      agentRuns: [
+        {
+          ...base,
+          id: "cancelled",
+          status: "interrupted",
+          stopReason: "timeout",
+          cleanup: { status: "unconfirmed", resources: ["tool:t1"], errors: ["cleanup failed"] },
+        },
+        { ...base, id: "old", status: "completed" },
+      ],
+    }),
+    { title: "Report", createdAt: "now" },
+  );
+  assert.match(report, /interrupted; reason: timeout; cleanup: unconfirmed/);
+  assert.match(report, /Stop unconfirmed: tool:t1/);
+  assert.match(report, /Cleanup error: cleanup failed/);
+  assert.match(report, /Run old: completed; reason: not recorded; cleanup: not recorded/);
+});
+
 test("buildSessionReport summarizes MCP servers and MCP tool calls", () => {
   const report = buildSessionReport(
     snapshotWith({

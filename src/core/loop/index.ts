@@ -6,3 +6,4 @@ export {
 } from "./loop.js";
 export type { AgentLoopOptions, AgentLoopResult, AgentLoopStopReason } from "./loop.js";
 export { describeFinalResponse } from "./response.js";
+export { ExecutionStoppedError } from "./cancellation.js";

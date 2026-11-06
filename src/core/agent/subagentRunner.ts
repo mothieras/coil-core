@@ -1,11 +1,12 @@
 import crypto from "node:crypto";
-import type { Agent } from "../../agent/agent.js";
-import { AgentRuntime } from "../../agent/runtime.js";
-import { createAgentRun, interruptAgentRun, type AgentRun } from "../../agent/run.js";
+import type { Agent } from "./agent.js";
+import { AgentRuntime } from "./runtime.js";
+import { createAgentRun, type AgentRun } from "./run.js";
+import type { CancelRunResult } from "./runtime.js";
 import { forkSubAgent } from "./subagent.js";
 import type { SubAgentOptions } from "./subagent.js";
-import type { CheckPermissionFn } from "../../permission/types.js";
-import { AsyncWorkInbox } from "../../async/asyncWorkInbox.js";
+import type { CheckPermissionFn } from "../permission/types.js";
+import { AsyncWorkInbox } from "../async/asyncWorkInbox.js";
 
 export type SubagentStatus = "running" | "completed" | "error" | "interrupted";
 
@@ -17,6 +18,7 @@ interface SubTask {
   agent: Agent;
   run: AgentRun;
   taskId?: string | undefined;
+  active: boolean;
 }
 
 export interface SubagentRecord {
@@ -88,7 +90,14 @@ export class SubAgentRunner {
       },
     });
 
-    const entry: SubTask = { status: "running", result: null, prompt, agent: child, run };
+    const entry: SubTask = {
+      status: "running",
+      result: null,
+      prompt,
+      agent: child,
+      run,
+      active: true,
+    };
     if (options.taskId) entry.taskId = options.taskId;
     this.subs.set(subId, entry);
     this.inbox.register({
@@ -104,16 +113,28 @@ export class SubAgentRunner {
     // and child.id === subId, so per-agent hook state keys correctly.
     void this.agentRuntime
       .run(child, run)
-      .then(({ run: completedRun }) =>
-        this.settle(subId, "completed", completedRun.resultSummary ?? ""),
-      )
-      .catch((error) =>
+      .then(async ({ run: completedRun }) => {
+        if (completedRun.status === "interrupted") this.inbox.suppress("subagent", subId);
+        await this.agentRuntime.whenSettled(run.id);
+        entry.active = false;
+        this.settle(
+          subId,
+          completedRun.status === "completed"
+            ? "completed"
+            : completedRun.status === "interrupted"
+              ? "interrupted"
+              : "error",
+          completedRun.resultSummary ?? "",
+        );
+      })
+      .catch((error) => {
+        entry.active = false;
         this.settle(
           subId,
           "error",
           `Error: ${error instanceof Error ? error.message : String(error)}`,
-        ),
-      );
+        );
+      });
 
     return `Subagent ${subId} started: ${prompt.slice(0, 80)}`;
   }
@@ -122,30 +143,19 @@ export class SubAgentRunner {
     return this.runningCount() > 0;
   }
 
-  interruptRunning(reason = "Interrupted by session close"): SubagentRecord[] {
-    const records: SubagentRecord[] = [];
+  async cancelAll(deadlineAt = Date.now() + 5_000): Promise<CancelRunResult[]> {
+    const pending: Promise<CancelRunResult>[] = [];
     for (const [subId, task] of this.subs) {
-      if (task.status !== "running") continue;
-      interruptAgentRun(task.run, reason);
-      task.status = "interrupted";
-      task.result = reason;
-      const record = this.recordFor(subId, task);
-      records.push(record);
-      this.inbox.settle({
-        id: subId,
-        kind: "subagent",
-        status: "interrupted",
-        result: reason,
-        record,
-        ...(task.taskId !== undefined ? { taskId: task.taskId } : {}),
-      });
+      if (!task.active) continue;
+      this.inbox.suppress("subagent", subId);
+      pending.push(this.agentRuntime.cancelRun(task.run.id, "session_close", deadlineAt));
     }
-    return records;
+    return Promise.all(pending);
   }
 
   private runningCount(): number {
     let n = 0;
-    for (const t of this.subs.values()) if (t.status === "running") n += 1;
+    for (const t of this.subs.values()) if (t.active) n += 1;
     return n;
   }
 

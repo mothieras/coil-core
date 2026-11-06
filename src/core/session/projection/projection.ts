@@ -131,14 +131,30 @@ function applyRuntimeLifecycleEvent(
         }),
         session: touchSession(snapshot, event.timestamp),
       };
+    case "agent_run_stopping": {
+      const existing = snapshot.agentRuns.find((run) => run.id === runtimeEvent.runId);
+      if (!existing || existing.status !== "running") return snapshot;
+      return {
+        ...snapshot,
+        agentRuns: upsertAgentRun(snapshot.agentRuns, {
+          ...existing,
+          status: "stopping",
+          stopReason: runtimeEvent.stopReason,
+          stopSource: runtimeEvent.stopSource,
+        }),
+        session: touchSession(snapshot, event.timestamp),
+      };
+    }
     case "agent_run_finished": {
       const existing = snapshot.agentRuns.find((run) => run.id === runtimeEvent.runId);
       if (!existing) return snapshot;
-      if (existing.status === "interrupted") return snapshot;
+      if (existing.status !== "running" && existing.status !== "stopping") return snapshot;
       const updated: AgentRunProjection = {
         ...existing,
         status: runtimeEvent.status,
         finishedAt: runtimeEvent.timestamp,
+        ...(runtimeEvent.stopSource !== undefined ? { stopSource: runtimeEvent.stopSource } : {}),
+        ...(runtimeEvent.cleanup !== undefined ? { cleanup: runtimeEvent.cleanup } : {}),
       };
       if (runtimeEvent.stopReason !== undefined) {
         updated.stopReason = runtimeEvent.stopReason;

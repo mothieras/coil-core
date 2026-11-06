@@ -1,4 +1,7 @@
 import test from "node:test";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import { ExecutionStoppedError } from "../src/core/loop/cancellation.js";
 import assert from "node:assert/strict";
 import { clearModelCache, createPiAiProvider, resolveModel } from "../src/core/providers/index.js";
 import { ProviderRequestError, httpStatusFromMessage } from "../src/core/providers/errors.js";
@@ -27,6 +30,90 @@ async function withEnv<T>(
     clearModelCache();
   }
 }
+
+test("adapter aborts before dispatch and after an in-flight completion", async () => {
+  await withEnv({ MODEL_ID: "test-model", FALLBACK_MODEL_ID: undefined }, async () => {
+    const abort = new AbortController();
+    let calls = 0;
+    const response = Promise.withResolvers<ReturnType<typeof textMessage>>();
+    const entered = Promise.withResolvers<void>();
+    const provider = createPiAiProvider({
+      resolveModel: () => testModel(),
+      complete: async (_model, _context, options) => {
+        calls++;
+        assert.equal(options?.signal, abort.signal);
+        entered.resolve();
+        return response.promise;
+      },
+    });
+    const request = { messages: [], tools: [] };
+    const pending = provider.generate(provider.model, request, { signal: abort.signal });
+    await entered.promise;
+    abort.abort();
+    response.resolve(textMessage("late"));
+    await assert.rejects(pending, ExecutionStoppedError);
+    await assert.rejects(
+      provider.generate(provider.model, request, { signal: abort.signal }),
+      ExecutionStoppedError,
+    );
+    assert.equal(calls, 1);
+  });
+});
+
+test(
+  "real pi-ai adapter cancellation closes a local HTTP request without retry",
+  { timeout: 10_000 },
+  async () => {
+    const entered = Promise.withResolvers<void>();
+    const disconnected = Promise.withResolvers<void>();
+    let calls = 0;
+    const server = createServer((_req, res) => {
+      calls++;
+      res.on("close", () => disconnected.resolve());
+      entered.resolve();
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      await withEnv(
+        {
+          MODEL_ID: "local-test",
+          FALLBACK_MODEL_ID: undefined,
+          ANTHROPIC_API_KEY: "local-fixture-only",
+        },
+        async () => {
+          const provider = createPiAiProvider({
+            resolveModel: () => ({
+              ...testModel(),
+              api: "anthropic-messages",
+              provider: "anthropic",
+              baseUrl: `http://127.0.0.1:${address.port}`,
+            }),
+          });
+          const abort = new AbortController();
+          const pending = provider.generate(
+            provider.model,
+            { messages: [userMessage("hello")], tools: [] },
+            { signal: abort.signal },
+          );
+          const rejected = assert.rejects(pending, ExecutionStoppedError);
+          await entered.promise;
+          abort.abort();
+          await rejected;
+          await disconnected.promise;
+          assert.equal(calls, 1);
+        },
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  },
+);
 
 test("resolveModel returns the catalog entry for a known model", async () => {
   const catalog = getModelsCollection().getModels("anthropic")[0];

@@ -1,7 +1,7 @@
-import type { Agent } from "../../agent/agent.js";
-import { DEFAULT_SUB_AGENT_MAX_TURNS, DEFAULT_SUB_AGENT_TIMEOUT_MS } from "../../loop/options.js";
-import type { CheckPermissionFn } from "../../permission/types.js";
-import { SUB_AGENT_ALLOWED_TOOLS } from "../profiles.js";
+import type { Agent } from "./agent.js";
+import { DEFAULT_SUB_AGENT_MAX_TURNS, DEFAULT_SUB_AGENT_TIMEOUT_MS } from "../loop/options.js";
+import type { CheckPermissionFn } from "../permission/types.js";
+import { SUB_AGENT_ALLOWED_TOOLS } from "../tools/profiles.js";
 
 export type SubAgentOptions = {
   name?: string;
@@ -35,9 +35,11 @@ export function forkSubAgent(
   // profile. This keeps child tool access ⊆ the profile (and since the profile
   // excludes `subagent`, a child can never spawn grandchildren).
   const requested = options?.allowedTools;
-  const allowedTools = requested
-    ? SUB_AGENT_ALLOWED_TOOLS.filter((tool) => requested.includes(tool))
-    : SUB_AGENT_ALLOWED_TOOLS;
+  const allowedTools = SUB_AGENT_ALLOWED_TOOLS.filter(
+    (tool) =>
+      (requested === undefined || requested.includes(tool)) &&
+      (parent.allowedTools === undefined || parent.allowedTools.includes(tool)),
+  );
 
   return parent.fork({
     id,

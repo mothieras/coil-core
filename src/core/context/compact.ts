@@ -1,3 +1,4 @@
+import { throwIfAborted } from "../loop/cancellation.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -235,6 +236,7 @@ function formatMessagesForSummary(messages: Message[]): string {
 async function summarizeConversation(
   summaryInput: string,
   generate: TextGenerator,
+  signal?: AbortSignal,
 ): Promise<string> {
   const { text } = await generate(
     [
@@ -248,7 +250,7 @@ async function summarizeConversation(
       "",
       summaryInput,
     ].join("\n"),
-    { maxTokens: 2000 },
+    { maxTokens: 2000, signal },
   );
 
   return text === "" ? "No summary generated." : text;
@@ -259,8 +261,12 @@ async function compactMessagesWithResult(
   reason: string,
   workspaceRoot = process.cwd(),
   generate?: TextGenerator,
+  signal?: AbortSignal,
 ): Promise<ForceCompactResult> {
+  throwIfAborted(signal);
+  const original = messages.slice();
   const transcriptPath = await saveTranscript(messages, workspaceRoot);
+  throwIfAborted(signal);
   const { oldMessages, recentMessages } = splitMessagesForAutoCompact(
     messages,
     RECENT_RAW_CHAR_LIMIT,
@@ -268,7 +274,14 @@ async function compactMessagesWithResult(
   const messagesToSummarize = oldMessages.length > 0 ? oldMessages : messages;
   const messagesToPreserve = oldMessages.length > 0 ? recentMessages : [];
   const summaryInput = formatMessagesForSummary(messagesToSummarize);
-  const summary = await summarizeConversation(summaryInput, generate ?? textGenerator());
+  const summary = await summarizeConversation(summaryInput, generate ?? textGenerator(), signal);
+  throwIfAborted(signal);
+  if (
+    messages.length !== original.length ||
+    original.some((message, index) => messages[index] !== message)
+  ) {
+    throw new Error("Conversation changed during compaction");
+  }
 
   messages.splice(
     0,
@@ -300,8 +313,10 @@ async function compactMessages(
   reason: string,
   workspaceRoot = process.cwd(),
   generate?: TextGenerator,
+  signal?: AbortSignal,
 ): Promise<boolean> {
-  return (await compactMessagesWithResult(messages, reason, workspaceRoot, generate)).compacted;
+  return (await compactMessagesWithResult(messages, reason, workspaceRoot, generate, signal))
+    .compacted;
 }
 
 export async function autoCompactIfNeeded(
@@ -309,10 +324,11 @@ export async function autoCompactIfNeeded(
   workspaceRoot?: string,
   tracker?: ContextSizeTracker,
   generate?: TextGenerator,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   if (contextTokens(messages, tracker) <= AUTO_COMPACT_THRESHOLD) return false;
 
-  return compactMessages(messages, "automatic token threshold", workspaceRoot, generate);
+  return compactMessages(messages, "automatic token threshold", workspaceRoot, generate, signal);
 }
 
 export async function forceCompact(
@@ -320,10 +336,11 @@ export async function forceCompact(
   workspaceRoot?: string,
   reason = "manual slash command",
   generate?: TextGenerator,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   if (messages.length === 0) return false;
 
-  return compactMessages(messages, reason, workspaceRoot, generate);
+  return compactMessages(messages, reason, workspaceRoot, generate, signal);
 }
 
 export async function forceCompactWithResult(
@@ -331,8 +348,9 @@ export async function forceCompactWithResult(
   workspaceRoot?: string,
   reason = "manual slash command",
   generate?: TextGenerator,
+  signal?: AbortSignal,
 ): Promise<ForceCompactResult> {
   if (messages.length === 0) return { compacted: false };
 
-  return compactMessagesWithResult(messages, reason, workspaceRoot, generate);
+  return compactMessagesWithResult(messages, reason, workspaceRoot, generate, signal);
 }

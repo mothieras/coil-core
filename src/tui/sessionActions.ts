@@ -1,6 +1,7 @@
 import type { SessionListItem } from "../core/session/store/sessionStore.js";
 
-export type TurnPhase = "thinking" | "waiting-async" | "auto-waking" | "idle";
+export type TurnPhase =
+  "thinking" | "waiting-async" | "auto-waking" | "idle" | "closing" | "close-failed";
 
 export type TurnController = {
   handleUserMessage(text: string): Promise<unknown>;
@@ -17,7 +18,7 @@ export async function drainTurn(
   onPhase("thinking");
   try {
     await controller.handleUserMessage(text);
-    while (controller.hasPendingAsyncWork()) {
+    while (!shouldStop() && controller.hasPendingAsyncWork()) {
       onPhase("waiting-async");
       const result = await controller.waitForAsyncWork({ shouldStop });
       if (result === "interrupted") break;

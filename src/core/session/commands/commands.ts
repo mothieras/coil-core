@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { throwIfAborted } from "../../loop/cancellation.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { getModel } from "../../config/index.js";
@@ -19,6 +20,7 @@ import type { SessionStore } from "../store/sessionStore.js";
 import type { ReportProjection } from "../types.js";
 
 type SessionCommandsDeps = {
+  signal?: AbortSignal | undefined;
   sessionId: string;
   leadAgent: Agent;
   store: SessionProjectionStore;
@@ -29,6 +31,7 @@ type SessionCommandsDeps = {
 };
 
 export class SessionCommands {
+  private readonly signal?: AbortSignal | undefined;
   private readonly sessionId: string;
   private readonly leadAgent: Agent;
   private readonly store: SessionProjectionStore;
@@ -38,6 +41,7 @@ export class SessionCommands {
   private readonly emit: (event: RuntimeLifecycleEvent) => void;
 
   constructor(deps: SessionCommandsDeps) {
+    this.signal = deps.signal;
     this.sessionId = deps.sessionId;
     this.leadAgent = deps.leadAgent;
     this.store = deps.store;
@@ -48,6 +52,7 @@ export class SessionCommands {
   }
 
   async handle(command: string): Promise<SessionCommandResult> {
+    throwIfAborted(this.signal);
     const trimmed = command.slice(1).trim();
     const [name = ""] = trimmed.split(/\s+/, 1);
     const args = trimmed.slice(name.length).trim();
@@ -155,6 +160,7 @@ export class SessionCommands {
         this.workspaceRoot,
         reason,
         textGenerator(this.leadAgent.provider),
+        this.signal,
       );
       const compacted = compactResult.compacted;
       this.emit(
@@ -211,8 +217,9 @@ export class SessionCommands {
           messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
           tools: [],
         },
-        { maxTokens: 1 },
+        { maxTokens: 1, signal: this.signal },
       );
+      throwIfAborted(this.signal);
       const elapsed = Date.now() - start;
       const usage = `in=${message.usage.input} out=${message.usage.output}`;
       return {
@@ -221,6 +228,7 @@ export class SessionCommands {
         body: `${elapsed}ms model=${getModel()} ${usage}`,
       };
     } catch (error) {
+      throwIfAborted(this.signal);
       const message = error instanceof Error ? error.message : String(error);
       return {
         action: "notice",

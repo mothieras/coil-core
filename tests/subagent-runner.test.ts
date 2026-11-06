@@ -5,8 +5,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Agent, currentAgent } from "../src/core/agent/agent.js";
-import { SubAgentRunner } from "../src/core/tools/subagent/subagentRunner.js";
-import type { SubagentRecord } from "../src/core/tools/subagent/subagentRunner.js";
+import { SubAgentRunner } from "../src/core/agent/subagentRunner.js";
+import type { SubagentRecord } from "../src/core/agent/subagentRunner.js";
 import type { ToolRuntime } from "../src/core/tools/runtime.js";
 import type { Provider } from "../src/core/providers/index.js";
 import { createAppContext } from "../src/core/app/context.js";
@@ -84,44 +84,58 @@ test("SubAgentRunner emits started and finished records with child run context",
   assert.deepEqual(finished, [`${subId}:completed:sub done`]);
 });
 
-test("interruptRunning marks running subagents interrupted and emits records", async () => {
-  const neverRuntime = {
-    run: async () => await new Promise<never>(() => {}),
-  } as unknown as ConstructorParameters<typeof SubAgentRunner>[1];
+test("cancelAll stops actual execution and suppresses cancelled results", async () => {
+  const entered = Promise.withResolvers<void>();
+  const response = Promise.withResolvers<ReturnType<typeof textMessage>>();
   const inbox = new AsyncWorkInbox();
   const finished: string[] = [];
   inbox.subscribe((n) => {
-    if (n.status !== "running") finished.push(`${(n.record as SubagentRecord).id}:${n.status}`);
+    if (n.status !== "running") finished.push(n.status);
   });
-  const runner = new SubAgentRunner(4, neverRuntime, inbox);
-
-  const out = runner.run(
-    parentAgent(
-      okRuntime(),
-      fakeProvider(() => textMessage("done")),
-    ),
-    "slow task",
-    {
-      sessionId: "s1",
-      parentRunId: "run_parent",
-      parentToolCallId: "tool_parent",
-    },
+  const runner = new SubAgentRunner(1, undefined, inbox);
+  const parent = parentAgent(
+    okRuntime(),
+    fakeProvider(() => {
+      entered.resolve();
+      return response.promise;
+    }),
   );
-  const subId = out.match(/Subagent (\w+) started/)![1];
+  runner.run(parent, "slow", { parentRunId: "parent" });
+  await entered.promise;
+  const stopped = runner.cancelAll();
   assert.equal(runner.hasRunning(), true);
-
-  const records = runner.interruptRunning();
-
+  assert.match(runner.run(parent, "too early"), /too many/);
+  response.resolve(textMessage("late"));
+  const results = await stopped;
+  await waitUntilSettled(runner);
+  assert.equal(results[0]?.cleanup?.status, "confirmed");
   assert.equal(runner.hasRunning(), false);
-  assert.equal(records.length, 1);
-  assert.equal(records[0]?.id, subId);
-  assert.equal(records[0]?.status, "interrupted");
-  assert.equal(records[0]?.parentRunId, "run_parent");
-  assert.equal(records[0]?.parentToolCallId, "tool_parent");
-  assert.deepEqual(finished, [`${subId}:interrupted`]);
+  assert.deepEqual(finished, ["interrupted"]);
+  assert.deepEqual(inbox.drainNotifications(), []);
+});
 
-  const notifs = inbox.drainNotifications();
-  assert.equal(notifs[0]?.status, "interrupted");
+test("unconfirmed child retains capacity until its real provider settles", async () => {
+  const entered = Promise.withResolvers<void>();
+  const response = Promise.withResolvers<ReturnType<typeof textMessage>>();
+  const runner = new SubAgentRunner(1);
+  const parent = parentAgent(
+    okRuntime(),
+    fakeProvider(() => {
+      entered.resolve();
+      return response.promise;
+    }),
+  );
+  runner.run(parent, "pending");
+  await entered.promise;
+  const results = await runner.cancelAll(Date.now());
+  assert.equal(results[0]?.cleanup?.status, "unconfirmed");
+  assert.equal(runner.hasRunning(), true);
+  assert.match(runner.run(parent, "blocked"), /too many/);
+  response.resolve(textMessage("late"));
+  await waitUntilSettled(runner);
+  assert.equal(runner.hasRunning(), false);
+  assert.match(runner.run(parent, "allowed"), /started/);
+  await waitUntilSettled(runner);
 });
 
 test("completed subagent reports full untruncated result, then drains once", async () => {

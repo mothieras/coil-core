@@ -30,6 +30,7 @@ export type UseSessionApi = {
   submit: (v: string) => void;
   decide: (allow: boolean) => void;
   interrupt: () => void;
+  cancel: () => void;
   quit: () => void;
   history: readonly string[];
 };
@@ -39,6 +40,7 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
   const unsubRef = useRef<(() => void) | null>(null);
   const busyRef = useRef<boolean>(false);
   const interruptRef = useRef<boolean>(false);
+  const closingRef = useRef<boolean>(false);
   const seq = useRef<number>(0);
   const historyRef = useRef<string[]>([]);
 
@@ -81,7 +83,12 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
   }
 
   function reportError(scope: string, err: unknown): void {
-    const message = err instanceof Error ? err.message : String(err);
+    const message =
+      err instanceof AggregateError
+        ? `${err.message}: ${err.errors.map((e) => String(e)).join("; ")}`
+        : err instanceof Error
+          ? err.message
+          : String(err);
     setState((s) => appendInfoLog(s, { id: nextId(), title: `${scope} error`, detail: message }));
   }
 
@@ -102,6 +109,7 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
   }
 
   function endOperation(): void {
+    if (closingRef.current) return;
     busyRef.current = false;
     setBusy(false);
     setPhase("idle");
@@ -112,7 +120,9 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
     try {
       await drainTurn(text, {
         controller: controllerRef.current,
-        onPhase: setPhase,
+        onPhase: (phase) => {
+          if (!closingRef.current) setPhase(phase);
+        },
         shouldStop: () => interruptRef.current,
       });
     } catch (err) {
@@ -145,6 +155,7 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
         opts.onExit?.();
       }
     } catch (err) {
+      if (closingRef.current) setPhase("close-failed");
       reportError("Command", err);
     } finally {
       endOperation();
@@ -228,8 +239,11 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
   }
 
   async function shutdown(): Promise<void> {
-    unsubRef.current?.();
+    closingRef.current = true;
+    setPhase("closing");
+    interruptRef.current = true;
     await controllerRef.current.close();
+    unsubRef.current?.();
   }
 
   function submit(value: string): void {
@@ -261,16 +275,19 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
     interruptRef.current = true;
   }
 
+  function cancel(): void {
+    interruptRef.current = true;
+    void controllerRef.current.cancelRun().catch((error) => reportError("Cancel", error));
+  }
+
   function quit(): void {
-    if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
     void shutdown()
       .then(() => opts.onExit?.())
-      .catch((error: unknown) => reportError("Exit", error))
-      .finally(() => {
-        busyRef.current = false;
-        setBusy(false);
+      .catch((error: unknown) => {
+        setPhase("close-failed");
+        reportError("Exit", error);
       });
   }
 
@@ -284,6 +301,7 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
     submit,
     decide,
     interrupt,
+    cancel,
     quit,
     history: historyRef.current,
   };

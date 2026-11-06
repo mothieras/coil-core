@@ -10,8 +10,10 @@ import { ToolRegistry } from "../tools/registry.js";
 import { ToolRuntime } from "../tools/runtime.js";
 import { validateToolProfiles } from "../tools/profiles.js";
 import type { ToolProviderLoadResult } from "../tools/types.js";
-import type { AgentRuntime } from "../agent/runtime.js";
-import { SubAgentRunner } from "../tools/subagent/subagentRunner.js";
+import { AgentRuntime } from "../agent/runtime.js";
+import { currentAgent } from "../agent/agent.js";
+import { throwIfAborted } from "../loop/cancellation.js";
+import { SubAgentRunner } from "../agent/subagentRunner.js";
 import { memoryStatePath, taskStatePath } from "../state/paths.js";
 import { AsyncWorkInbox } from "../async/asyncWorkInbox.js";
 
@@ -23,6 +25,7 @@ export interface AppContext {
   toolRegistry: ToolRegistry;
   toolRuntime: ToolRuntime;
   subAgentRunner: SubAgentRunner;
+  agentRuntime: AgentRuntime;
   inbox: AsyncWorkInbox;
   closeToolProviders(): Promise<void>;
 }
@@ -47,20 +50,33 @@ export function createAppContext(
     options.onTaskChanged ? { onTaskChanged: options.onTaskChanged } : {},
   );
   const inbox = new AsyncWorkInbox();
-  const backgroundManager = new BackgroundManager(workspaceRoot, inbox);
+  const agentRuntime = options.agentRuntime ?? new AgentRuntime();
+  const backgroundManager = new BackgroundManager(workspaceRoot, inbox, (runId, work) =>
+    agentRuntime.registerWork(runId, work),
+  );
   const toolRegistry = new ToolRegistry();
   const toolRuntime = new ToolRuntime({
     taskManager,
     backgroundManager,
     registry: toolRegistry,
   });
-  const subAgentRunner = new SubAgentRunner(undefined, options.agentRuntime, inbox);
+  const subAgentRunner = new SubAgentRunner(undefined, agentRuntime, inbox);
   const builtinTools = loadBuiltinTools({
     workspaceRoot,
     taskManager,
     backgroundManager,
-    subAgentRunner,
-    ...(options.checkPermission ? { checkPermission: options.checkPermission } : {}),
+    startSubagent: (prompt, subOptions, context) => {
+      throwIfAborted(context?.signal);
+      const parent = currentAgent.getStore();
+      if (!parent) return "Error: subagent can only be spawned from within an agent loop.";
+      return subAgentRunner.run(parent, prompt, {
+        ...subOptions,
+        sessionId: context?.sessionId,
+        parentRunId: context?.runId,
+        parentToolCallId: context?.toolCallId,
+        checkPermission: parent.checkPermission ?? options.checkPermission,
+      });
+    },
   });
   const providerResults = options.toolProviderResults ?? [];
   const closedToolProviderIndexes = new Set<number>();
@@ -79,23 +95,24 @@ export function createAppContext(
     toolRegistry,
     toolRuntime,
     subAgentRunner,
+    agentRuntime,
     inbox,
     async closeToolProviders() {
-      let firstError: unknown;
-      for (const [index, providerResult] of providerResults.entries()) {
-        if (closedToolProviderIndexes.has(index)) continue;
-        if (providerResult.close === undefined) {
+      const results = await Promise.allSettled(
+        providerResults.map(async (providerResult, index) => {
+          if (closedToolProviderIndexes.has(index)) return;
+          await providerResult.close?.();
           closedToolProviderIndexes.add(index);
-          continue;
-        }
-        try {
-          await providerResult.close();
-          closedToolProviderIndexes.add(index);
-        } catch (error) {
-          firstError ??= error;
-        }
-      }
-      if (firstError !== undefined) throw firstError;
+        }),
+      );
+      const errors = results.flatMap((result) =>
+        result.status === "rejected" ? [result.reason as unknown] : [],
+      );
+      if (errors.length)
+        throw new AggregateError(
+          errors,
+          `Tool provider cleanup failed: ${errors.map(String).join("; ")}`,
+        );
     },
   };
 }

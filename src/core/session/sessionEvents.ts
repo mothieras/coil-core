@@ -8,7 +8,7 @@ import {
 import type { RuntimeLifecycleEvent } from "../agent/lifecycle.js";
 import type { TaskRecord } from "../tools/task/taskManager.js";
 import type { BackgroundCommandRecord } from "../tools/background/backgroundManager.js";
-import type { SubagentRecord } from "../tools/subagent/subagentRunner.js";
+import type { SubagentRecord } from "../agent/subagentRunner.js";
 import type { ProviderDiagnostic } from "../tools/types.js";
 import {
   createSessionEvent,

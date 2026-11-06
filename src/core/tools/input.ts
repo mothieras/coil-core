@@ -3,6 +3,7 @@ import type { ToolSource } from "./types.js";
 
 export type ToolInput = Record<string, unknown>;
 export type ToolInvocationContext = {
+  signal?: AbortSignal | undefined;
   toolCallId?: string | undefined;
   toolName: string;
   runId?: string | undefined;

@@ -1,8 +1,8 @@
 # Agent runtime 架构优化与可靠性打磨实施计划
 
-状态：M0 已完成，M1–M5 未开始。依据：[SPEC.md](SPEC.md)。代码基线：`54551bc`。
+状态：M0、M1 已完成，M2–M5 未开始。依据：[SPEC.md](SPEC.md)。代码基线：`54551bc`。
 
-本文件是内部实施计划，描述工作顺序、预期修改范围和验证方式，不替代规格。本次已按用户授权完成 M0 只读审查、基线检查及设计评审；M1 契约见 SPEC 第 9 节。本次授权不包含 M1 实现。
+本文件是内部实施计划，描述工作顺序、预期修改范围和验证方式，不替代规格。M0 已完成只读审查、基线检查及设计评审；本次按用户新增授权完成 M1，实现契约与平台限制见 SPEC 第 9 节。M2–M5、提交和发布不在本次授权内。
 
 ## 1. 执行原则
 
@@ -85,11 +85,11 @@ M0 出口汇总：本机 macOS arm64、Node 24.21.0、pnpm 11.0.9 下，237 个�
 
 主要范围：`src/core/agent/run.ts`、`src/core/agent/runtime.ts`、`src/core/loop/options.ts`、`src/core/agent/lifecycle.ts`，及 session 事件和投影消费者。
 
-- [ ] 先补终态竞争测试：正常完成先到、取消先到、超时先到、重复取消、迟到异常。
-- [ ] 将执行中控制句柄与可序列化运行记录分开；取消控制器不写入持久化数据。
-- [ ] 确定一个权威终态决策位置；loop 报告结果，外围不再分别覆盖相同 run 的终态。
-- [ ] 映射错误、超时和达到限制等结束原因，不把所有正常返回归为成功。
-- [ ] 同步事件类型、投影、报告和公开导出；同一存活 run 只发布一次最终运行事件。
+- [x] 先补终态竞争测试：正常完成先到、取消先到、超时先到、重复取消、迟到异常。
+- [x] 将执行中控制句柄与可序列化运行记录分开；取消控制器不写入持久化数据。
+- [x] 确定一个权威终态决策位置；loop 报告结果，外围不再分别覆盖相同 run 的终态。
+- [x] 映射错误、超时和达到限制等结束原因，不把所有正常返回归为成功。
+- [x] 同步事件类型、投影、报告和公开导出；同一存活 run 只发布一次最终运行事件。
 
 优先扩展 `tests/agent-runtime.test.ts`、`tests/runtime-lifecycle.test.ts`、`tests/session-projection.test.ts`、`tests/session-report.test.ts`。
 
@@ -99,12 +99,12 @@ M0 出口汇总：本机 macOS arm64、Node 24.21.0、pnpm 11.0.9 下，237 个�
 
 主要范围：`src/core/providers/types.ts`、`src/core/providers/pi.ts`、`src/core/providers/text.ts`、`src/core/loop/loop.ts`、`src/core/loop/deadline.ts`、`src/core/loop/recovery.ts`、`src/core/context/compact.ts`、`src/core/permission/`。
 
-- [ ] 用 `AbortSignal` 贯通调用上下文；核对已安装 pi-ai 的实际选项，不凭印象适配。
-- [ ] 区分主动取消、超时与 provider 请求失败；保留 HTTP 状态和 `retry-after`，继续由 coil 控制重试预算。
-- [ ] 将重试等待、权限等待和 deadline 接入取消与清理；在模型和工具实际派发前检查信号。
-- [ ] 取消后不触发重试、降级或压缩补救；迟到权限答复不得派发工具。
-- [ ] 让运行内压缩请求接收同一取消范围；检查自动命名、手动压缩和 `/ping` 的生命周期归属，session 关闭时不遗留辅助请求。
-- [ ] 防止已停止的压缩或模型请求迟到后继续修改消息状态；不能仅结束调用方等待。
+- [x] 用 `AbortSignal` 贯通调用上下文；核对已安装 pi-ai 的实际选项，不凭印象适配。
+- [x] 区分主动取消、超时与 provider 请求失败；保留 HTTP 状态和 `retry-after`，继续由 coil 控制重试预算。
+- [x] 将重试等待、权限等待和 deadline 接入取消与清理；在模型和工具实际派发前检查信号。
+- [x] 取消后不触发重试、降级或压缩补救；迟到权限答复不得派发工具。
+- [x] 让运行内压缩请求接收同一取消范围；检查自动命名、手动压缩和 `/ping` 的生命周期归属，session 关闭时不遗留辅助请求。
+- [x] 防止已停止的压缩或模型请求迟到后继续修改消息状态；不能仅结束调用方等待。
 
 测试：扩展 `tests/pi-provider.test.ts`、`tests/error-recovery.test.ts`、`tests/agent.test.ts`、压缩相关测试。增加可控本地 HTTP 集成检查，穿过真实 pi-ai adapter 观察请求取消；fake provider 仅用于 loop 契约测试。
 
@@ -114,12 +114,12 @@ M0 出口汇总：本机 macOS arm64、Node 24.21.0、pnpm 11.0.9 下，237 个�
 
 主要范围：`src/core/tools/input.ts`、`src/core/tools/runtime.ts`、`src/core/tools/file/bash.ts`、`src/core/tools/background/backgroundManager.ts`、`src/core/tools/mcp/`。
 
-- [ ] 将信号传至工具 handler；运行取消和系统控制错误不能被通用 catch 转成普通工具错误。
-- [ ] 保存前台与后台进程句柄，采用共享的实际进程管理逻辑时保持 interface 小而明确，不泛化为任务平台。
-- [ ] 实现终止请求、有限等待、必要的升级终止与最终退出确认；记录清理失败或停止未确认。
-- [ ] 使用受控进程 fixture 验证进程及所声明支持的后代清理策略。不得只断言 `interrupted` 字段或发送过 kill。
-- [ ] 对不支持取消的工具和远端 MCP 操作保守报告，限制继续派发；取消一个 MCP 请求不关闭共享连接。
-- [ ] 为未执行和已中断的 tool calls 确定合法的消息收尾，取消后可以继续对话，不伪造成功结果。
+- [x] 将信号传至工具 handler；运行取消和系统控制错误不能被通用 catch 转成普通工具错误。
+- [x] 保存前台与后台进程句柄，采用共享的实际进程管理逻辑时保持 interface 小而明确，不泛化为任务平台。
+- [x] 实现终止请求、有限等待、必要的升级终止与最终退出确认；记录清理失败或停止未确认。
+- [x] 使用受控进程 fixture 验证进程及所声明支持的后代清理策略。不得只断言 `interrupted` 字段或发送过 kill。
+- [x] 对不支持取消的工具和远端 MCP 操作保守报告，限制继续派发；取消一个 MCP 请求不关闭共享连接。
+- [x] 为未执行和已中断的 tool calls 确定合法的消息收尾，取消后可以继续对话，不伪造成功结果。
 
 拟新增 `tests/tool-cancellation.test.ts`、`tests/process-cancellation.test.ts`；fixture 使用 TypeScript 或现有工具支持的形式，不新增手写 `.js`。每个测试负责回收自身进程，即使断言失败也执行清理。
 
@@ -129,12 +129,12 @@ M0 出口汇总：本机 macOS arm64、Node 24.21.0、pnpm 11.0.9 下，237 个�
 
 主要范围：`src/core/tools/subagent/`、`src/core/tools/builtins.ts`、`src/core/app/context.ts`、`src/core/agent/`、`src/core/tools/background/`。
 
-- [ ] 按 M0 结论把依赖 `Agent` 的子代理创建与运行协调放到允许依赖 agent 的位置，工具只依赖注入的启动能力及中立参数。
-- [ ] 保持 `agentLoop` 是唯一 ALS 绑定点；不得通过工具运行时重新绑定身份，也不向 loop 增加子代理特判。
-- [ ] 为活动子代理和后台工作记录 run/session 归属与完成句柄，使显式取消可以级联到相应后代。
-- [ ] 保留父 run 正常结束后的异步执行；取消 run 或关闭 session 时抑制相关自动唤醒。
-- [ ] 先实现基本容量保护：实际执行尚未结束的工作不能因“逻辑中断”立即释放槽位。
-- [ ] 删除被新所有权替代的重复终态写入路径，同时更新 barrel、工具装配、profiles 和调用方。
+- [x] 按 M0 结论把依赖 `Agent` 的子代理创建与运行协调放到允许依赖 agent 的位置，工具只依赖注入的启动能力及中立参数。
+- [x] 保持 `agentLoop` 是唯一 ALS 绑定点；不得通过工具运行时重新绑定身份，也不向 loop 增加子代理特判。
+- [x] 为活动子代理和后台工作记录 run/session 归属与完成句柄，使显式取消可以级联到相应后代。
+- [x] 保留父 run 正常结束后的异步执行；取消 run 或关闭 session 时抑制相关自动唤醒。
+- [x] 先实现基本容量保护：实际执行尚未结束的工作不能因“逻辑中断”立即释放槽位。
+- [x] 删除被新所有权替代的重复终态写入路径，同时更新 barrel、工具装配、profiles 和调用方。
 
 测试：`tests/subagent-runner.test.ts`、`tests/runtime-boundaries.test.ts`、`tests/builtin-tool-ownership.test.ts`、`tests/session-controller.test.ts`。补充真实 import 方向检查，不靠放宽断言绕过约束。
 
@@ -144,23 +144,25 @@ M0 出口汇总：本机 macOS arm64、Node 24.21.0、pnpm 11.0.9 下，237 个�
 
 主要范围：`src/core/session/controller.ts`、`src/core/session/runner.ts`、`src/core/session/viewEvents.ts`、`src/tui/useSession.ts`、`src/tui/sessionActions.ts`、`src/tui/permissionBridge.ts`、`src/tui/components/App.tsx`、`src/core/index.ts`。
 
-- [ ] 对外区分停止等待、取消 run、关闭 session；不把现有等待中断偷偷改成执行取消。
-- [ ] headless 入口和 controller 使用同一取消机制，不暴露内部 Map 或可变 run 供调用者修改。
-- [ ] 关闭时先拒绝新工作，执行取消与有限收尾，再关闭共享工具连接并保存状态；重复关闭不重复释放。
-- [ ] 保留并发收尾中的全部重要错误，不能因 finally 中另一异常掩盖原始失败。
-- [ ] TUI 仅消费 controller 和 view events，准确显示正在停止、已停止、停止未确认及关闭失败；不做视觉重设计。
-- [ ] 用现有框架验证等待、权限弹窗、执行和关闭阶段的按键行为，不由 UI 直接控制 loop。
+- [x] 对外区分停止等待、取消 run、关闭 session；不把现有等待中断偷偷改成执行取消。
+- [x] headless 入口和 controller 使用同一取消机制，不暴露内部 Map 或可变 run 供调用者修改。
+- [x] 关闭时先拒绝新工作，执行取消与有限收尾，再关闭共享工具连接并保存状态；重复关闭不重复释放。
+- [x] 保留并发收尾中的全部重要错误，不能因 finally 中另一异常掩盖原始失败。
+- [x] TUI 仅消费 controller 和 view events，准确显示正在停止、已停止、停止未确认及关闭失败；不做视觉重设计。
+- [x] 用现有框架验证等待、权限弹窗、执行和关闭阶段的按键行为，不由 UI 直接控制 loop。
 
 测试：扩展 session/controller、TUI actions、permission bridge 和组件测试；实际运行终端检查新状态，覆盖 80 列及无颜色场景。
 
 ### M1-06 交付第一个可展示版本
 
-- [ ] V01–V06 及相关回归通过，第 9 节阶段检查完成。
-- [ ] 提供无凭据取消示例，拟新增 `examples/cancel-run.ts`：启动受控工作、发起取消、打印结果与清理确认。
-- [ ] 在 README 记录取消范围、已验证平台、未确认状态与“不回滚副作用”的限制。
-- [ ] 审查最终 diff，确保没有遗留两套状态所有者或误扩展范围。
+- [x] V01–V06 及相关回归通过，第 9 节阶段检查完成。
+- [x] 提供无凭据取消示例，拟新增 `examples/cancel-run.ts`：启动受控工作、发起取消、打印结果与清理确认。
+- [x] 在 README 记录取消范围、已验证平台、未确认状态与“不回滚副作用”的限制。
+- [x] 审查最终 diff，确保没有遗留两套状态所有者或误扩展范围。
 
 M1 可以独立用于工程展示，但不声称 M3 的崩溃恢复或 M4 的完整交付语义已实现。
+
+M1 出口汇总：T005–T020 已完成。runtime 统一终态与取消；信号贯通模型、压缩、权限、工具及辅助请求；子代理协调迁至 agent 层，前后台进程按私有进程组清理，MCP 单调用取消保留共享连接。269 个测试、src/test 类型检查、lint、format、build 和通过 dist 公共导出的无凭据示例均通过。已在 macOS arm64/Node 24.21.0 验证真实 HTTP、进程/后代和 MCP；80×24、NO_COLOR=1 的真实 Ink PTY 检查覆盖取消、仅停止等待、停止未确认和关闭失败。Linux 仍待 CI 取证，未声明 Windows 进程树或线上模型保证。逐项证据与限制以 TASKS T005–T020 为准。
 
 ## 5. M2：工具执行契约
 
@@ -327,7 +329,7 @@ pnpm format:check
 | V13–V14   | M1-04、M4-01             | 容量准入、实际退出、父子与 session 取消范围     |
 | V15–V16   | M4-02、M4-03             | 去重、非重入唤醒、失败交付与共享连接隔离        |
 
-M0 已执行第 9.2 节五项基线检查，并检查 Markdown 格式、渲染、路径引用、任务依赖和变更范围；仅 M0 勾选完成。后续新增保证仍须通过对应阶段的实际消费者检查，不能以既有测试通过代替。
+M0 已执行第 9.2 节五项基线检查，并检查 Markdown 格式、渲染、路径引用、任务依赖和变更范围；M1 随后补齐对应实际消费者检查并通过阶段验收。M2–M5 的新增保证仍须在各自阶段验证，不能以既有测试通过代替。
 
 ## 10. 风险、变更控制与停止条件
 
@@ -351,10 +353,10 @@ M0 已执行第 9.2 节五项基线检查，并检查 Markdown 格式、渲染�
 逐项执行与验证记录见 [TASKS.md](TASKS.md)，以下仅在阶段出口完成后同步。
 
 - [x] M0：只读架构审查。
-- [ ] M1：生命周期与全链路取消。
+- [x] M1：生命周期与全链路取消。
 - [ ] M2：工具执行契约。
 - [ ] M3：持久化与安全恢复。
 - [ ] M4：异步工作可靠性。
 - [ ] M5：交付与工程展示。
 
-M0 已完成；M1–M5 未开始。下一步是获准后从 TASKS T005 开始 M1 的终态保护与生命周期实现，不是更换框架或全仓重构。本次不自动进入 M1，不提交或发布。
+M0、M1 已完成；M2–M5 未开始。下一步是获准后从 TASKS T021 决定 M2 的工具结果与校验演进方案。本次不自动进入 M2，不提交或发布。

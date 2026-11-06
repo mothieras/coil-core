@@ -15,6 +15,7 @@ export function App({ session }: { session: UseSessionApi }): React.ReactElement
     submit,
     decide,
     interrupt,
+    cancel,
     quit,
     history,
   } = session;
@@ -23,7 +24,12 @@ export function App({ session }: { session: UseSessionApi }): React.ReactElement
 
   useInput((keyInput, key) => {
     if (key.ctrl && keyInput === "c") {
-      if (!busy) quit();
+      if (busy) cancel();
+      else quit();
+      return;
+    }
+    if (key.ctrl && keyInput === "d") {
+      quit();
       return;
     }
     if (key.escape && phase === "waiting-async" && busy && permission === null) interrupt();

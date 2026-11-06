@@ -28,6 +28,15 @@ export function buildSessionReport(
   lines.push("");
   lines.push("## Activity");
   lines.push(`- Agent runs: ${snapshot.agentRuns.length}`);
+  for (const run of snapshot.agentRuns) {
+    lines.push(
+      `- Run ${run.id}: ${run.status}; reason: ${run.stopReason ?? "not recorded"}; cleanup: ${run.cleanup?.status ?? "not recorded"}`,
+    );
+    for (const resource of run.cleanup?.resources ?? [])
+      lines.push(`  - Stop unconfirmed: ${singleLine(resource)}`);
+    for (const error of run.cleanup?.errors ?? [])
+      lines.push(`  - Cleanup error: ${singleLine(error)}`);
+  }
   lines.push(`- Tool calls: ${snapshot.toolCalls.length}`);
   lines.push(`- Tasks: ${snapshot.tasks.length}`);
   lines.push(`- Background commands: ${snapshot.backgroundCommands.length}`);

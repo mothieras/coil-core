@@ -15,7 +15,15 @@ export type AgentRunTrigger =
       parentToolCallId?: string | undefined;
     };
 
-export type AgentRunStatus = "created" | "running" | "completed" | "failed" | "interrupted";
+export type AgentRunStatus =
+  "created" | "running" | "stopping" | "completed" | "failed" | "interrupted";
+
+export type RunStopSource = "user" | "session_close" | "deadline" | "signal";
+export type RunCleanupResult = {
+  status: "not_needed" | "confirmed" | "unconfirmed";
+  resources: string[];
+  errors: string[];
+};
 
 export type AgentRun = {
   id: string;
@@ -28,6 +36,8 @@ export type AgentRun = {
   startedAt?: string | undefined;
   finishedAt?: string | undefined;
   stopReason?: string | null | undefined;
+  stopSource?: RunStopSource | undefined;
+  cleanup?: RunCleanupResult | undefined;
   resultSummary?: string | undefined;
   error?: string | undefined;
   messageCount?: number | undefined;
@@ -65,15 +75,20 @@ export function createAgentRun(options: CreateAgentRunOptions): AgentRun {
 }
 
 export function startAgentRun(run: AgentRun, now = timestamp()): AgentRun {
+  if (run.status !== "created") return run;
   run.status = "running";
   run.startedAt = now;
   return run;
 }
 
 export function completeAgentRun(run: AgentRun, options: CompleteAgentRunOptions = {}): AgentRun {
-  run.status = "completed";
+  if (!canFinish(run)) return run;
+  const reason = options.stopReason ?? "stop";
+  run.status = reason === "stop" ? "completed" : reason === "timeout" ? "interrupted" : "failed";
   run.finishedAt = options.now ?? timestamp();
-  if (options.stopReason !== undefined) run.stopReason = options.stopReason;
+  run.stopReason = ["pending", "deferred", "toolUse", "aborted"].includes(reason)
+    ? "error"
+    : reason;
   if (options.resultSummary !== undefined) {
     run.resultSummary = options.resultSummary;
   }
@@ -85,16 +100,48 @@ export function completeAgentRun(run: AgentRun, options: CompleteAgentRunOptions
 }
 
 export function failAgentRun(run: AgentRun, error: unknown, now = timestamp()): AgentRun {
+  if (!canFinish(run)) return run;
   run.status = "failed";
+  run.stopReason = "error";
   run.finishedAt = now;
   run.error = formatRunError(error);
   return run;
 }
 
 export function interruptAgentRun(run: AgentRun, reason: string, now = timestamp()): AgentRun {
+  if (!canFinish(run)) return run;
   run.status = "interrupted";
+  run.stopReason = "aborted";
   run.finishedAt = now;
   run.error = reason;
+  return run;
+}
+
+function canFinish(run: AgentRun): boolean {
+  return run.status === "created" || run.status === "running";
+}
+
+export function requestAgentRunStop(
+  run: AgentRun,
+  reason: "aborted" | "timeout",
+  source: RunStopSource,
+): boolean {
+  if (!canFinish(run)) return false;
+  run.status = "stopping";
+  run.stopReason = reason;
+  run.stopSource = source;
+  return true;
+}
+
+export function finishAgentRunStop(
+  run: AgentRun,
+  cleanup: RunCleanupResult,
+  now = timestamp(),
+): AgentRun {
+  if (run.status !== "stopping") return run;
+  run.cleanup = cleanup;
+  run.status = "interrupted";
+  run.finishedAt = now;
   return run;
 }
 

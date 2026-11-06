@@ -29,24 +29,3 @@ export function remainingMs(deadlineAt: number | undefined): number | undefined 
   if (remaining <= 0) throw new AgentLoopTimeoutError();
   return remaining;
 }
-
-export async function awaitWithDeadline<T>(
-  promise: Promise<T>,
-  deadlineAt: number | undefined,
-): Promise<T> {
-  const remaining = msUntilDeadline(deadlineAt);
-  if (remaining === undefined) return promise;
-  if (remaining <= 0) throw new AgentLoopTimeoutError();
-
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new AgentLoopTimeoutError()), remaining);
-    timer.unref();
-  });
-
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}

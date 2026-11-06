@@ -1,4 +1,11 @@
 import crypto from "node:crypto";
+import {
+  CLEANUP_TIMEOUT_MS,
+  ExecutionScope,
+  ExecutionStoppedError,
+  throwIfAborted,
+  cancellableDelay,
+} from "./cancellation.js";
 import type {
   Api,
   AssistantMessage,
@@ -7,12 +14,7 @@ import type {
   ToolResultMessage,
   UserMessage,
 } from "@earendil-works/pi-ai";
-import {
-  awaitWithDeadline,
-  isDeadlineError,
-  remainingMs,
-  throwIfDeadlineExpired,
-} from "./deadline.js";
+import { isDeadlineError, remainingMs, throwIfDeadlineExpired } from "./deadline.js";
 import {
   DEFAULT_MAIN_AGENT_MAX_TURNS,
   DEFAULT_SUB_AGENT_MAX_TURNS,
@@ -30,6 +32,7 @@ import {
 } from "../context/compact.js";
 import type { ContextSizeTracker } from "../context/compact.js";
 import { Agent, currentAgent } from "../agent/agent.js";
+import { claimAgent, releaseAgent } from "../agent/ownership.js";
 import {
   createRuntimeLifecycleEvent,
   runtimeLifecycleBase,
@@ -65,13 +68,22 @@ export type { AgentLoopResult, AgentLoopStopReason };
 export type AgentLoopOptions = {
   lifecycle?: RuntimeLifecycleSink | undefined;
   runContext?: RuntimeRunContext | undefined;
+  signal?: AbortSignal | undefined;
+  /** Internal execution ownership, shared with AgentRuntime. */
+  scope?: ExecutionScope | undefined;
 };
+
+function waitForOperation<T>(
+  promise: Promise<T>,
+  options: AgentLoopOptions,
+  resource: string,
+): Promise<T> {
+  return options.scope!.wait(promise, resource);
+}
 
 function stopContent(text: string): AssistantMessage["content"] {
   return [{ type: "text", text }];
 }
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function formatRuntimeError(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
@@ -263,6 +275,7 @@ async function executeToolUseBlock(
         );
       };
       const permissionContext: PermissionCheckContext = {
+        signal: loopOptions.signal,
         permissionId,
         toolName: block.name,
         input,
@@ -275,7 +288,12 @@ async function executeToolUseBlock(
         inputSummary,
         emitPermissionRequested,
       };
-      const permResult = await awaitWithDeadline(checkPermission(permissionContext), deadlineAt);
+      throwIfAborted(loopOptions.signal);
+      const permResult = await waitForOperation(
+        checkPermission(permissionContext),
+        loopOptions,
+        `permission:${block.id}`,
+      );
       if (loopOptions.runContext && (!permResult.allowed || permResult.requested)) {
         safeEmitRuntimeLifecycle(
           loopOptions.lifecycle,
@@ -308,10 +326,12 @@ async function executeToolUseBlock(
     let output: string;
     let invokeError: string | undefined;
     try {
-      output = await awaitWithDeadline(
+      throwIfAborted(loopOptions.signal);
+      output = await waitForOperation(
         toolRuntime.invokeTool(block.name, block.arguments, {
           toolCallId: block.id,
           toolName: block.name,
+          signal: loopOptions.signal,
           ...(loopOptions.runContext !== undefined
             ? {
                 runId: loopOptions.runContext.runId,
@@ -322,9 +342,11 @@ async function executeToolUseBlock(
             : {}),
           ...(source !== undefined ? { source } : {}),
         }),
-        deadlineAt,
+        loopOptions,
+        `tool:${block.id}`,
       );
     } catch (error) {
+      if (error instanceof ExecutionStoppedError) throw error;
       if (isDeadlineError(error, deadlineAt)) throw error;
       invokeError = summarizeLifecycleError(error);
       output = `Error: ${formatRuntimeError(error)}`;
@@ -340,9 +362,20 @@ async function executeToolUseBlock(
     return { kind: "result", result: toolResult(block, output, isError) };
   } catch (error) {
     finish({
-      status: "error",
-      error: summarizeLifecycleError(error),
+      status:
+        error instanceof ExecutionStoppedError
+          ? error.resource?.startsWith("tool:") && error.confirmation === "unconfirmed"
+            ? "unconfirmed"
+            : error.reason === "timeout"
+              ? "timeout"
+              : "cancelled"
+          : "error",
+      error:
+        error instanceof ExecutionStoppedError && error.resource?.startsWith("permission:")
+          ? "Not executed: permission wait cancelled."
+          : summarizeLifecycleError(error),
     });
+    if (error instanceof ExecutionStoppedError) throw error;
     if (isDeadlineError(error, deadlineAt)) {
       return { kind: "timeout", result: timedOut() };
     }
@@ -366,10 +399,50 @@ export async function agentLoop(
 ): Promise<AgentLoopResult> {
   // Bind the agent to the async context for the whole run so tools dispatched
   // inside the loop (e.g. `subagent`) can fork the agent that invoked them.
-  return currentAgent.run(agent, () => agentLoopInner(agent, options));
+  const ownsScope = options.scope === undefined;
+  const scope = options.scope ?? new ExecutionScope();
+  const abort = () => scope.controller.abort(new ExecutionStoppedError());
+  if (ownsScope) {
+    claimAgent(agent);
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+  }
+  const timer =
+    !ownsScope || agent.timeoutMs === undefined
+      ? undefined
+      : setTimeout(
+          () => scope.controller.abort(new ExecutionStoppedError("timeout")),
+          Math.max(0, agent.timeoutMs),
+        );
+  try {
+    const result = await currentAgent.run(agent, () =>
+      agentLoopInner(agent, { ...options, signal: scope.signal, scope }),
+    );
+    if (ownsScope && scope.signal.aborted) {
+      result.stopReason =
+        scope.signal.reason instanceof ExecutionStoppedError
+          ? scope.signal.reason.reason
+          : "aborted";
+      result.cleanup = await scope.cleanup(Date.now() + CLEANUP_TIMEOUT_MS);
+    }
+    return result;
+  } finally {
+    clearTimeout(timer);
+    if (ownsScope) {
+      options.signal?.removeEventListener("abort", abort);
+      void scope.settled().then(() => releaseAgent(agent));
+    }
+  }
 }
 
 async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<AgentLoopResult> {
+  if (options.signal?.aborted) {
+    const reason =
+      options.signal.reason instanceof ExecutionStoppedError
+        ? options.signal.reason.reason
+        : "aborted";
+    return { stopReason: reason, content: stopContent(`Execution stopped: ${reason}`) };
+  }
   const messages = agent.messages;
   const timeoutMs = agent.timeoutMs;
   const provider = agent.provider ?? createDefaultProvider();
@@ -398,6 +471,7 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
     hooks?.emitEffect("LoopStart", messages);
 
     while (true) {
+      throwIfAborted(options.signal);
       if (turns >= maxTurns) {
         return {
           stopReason: "max_turns",
@@ -407,9 +481,10 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
       throwIfDeadlineExpired(deadlineAt);
 
       if (microCompact(messages, usageTracker)) usageTracker = undefined;
-      const autoCompacted = await awaitWithDeadline(
-        autoCompactIfNeeded(messages, workspaceRoot, usageTracker, generateText),
-        deadlineAt,
+      const autoCompacted = await waitForOperation(
+        autoCompactIfNeeded(messages, workspaceRoot, usageTracker, generateText, options.signal),
+        options,
+        "compaction",
       );
       if (autoCompacted) usageTracker = undefined;
 
@@ -420,15 +495,18 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
       // ── LLM call — outcome capture for recovery decision ──
       let outcome: LLMOutcome;
       try {
-        const callOptions: ProviderCallOptions = { maxTokens };
+        throwIfAborted(options.signal);
+        const callOptions: ProviderCallOptions = { maxTokens, signal: options.signal };
         const timeout = remainingMs(deadlineAt);
         if (timeout !== undefined) callOptions.timeoutMs = timeout;
-        const response = await awaitWithDeadline(
+        const response = await waitForOperation(
           provider.generate(activeModel, { system, messages, tools }, callOptions),
-          deadlineAt,
+          options,
+          "provider",
         );
         outcome = { kind: "success", response };
       } catch (error) {
+        if (error instanceof ExecutionStoppedError) throw error;
         if (isDeadlineError(error, deadlineAt)) return timedOut();
         outcome = { kind: "error", error };
       }
@@ -475,12 +553,20 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
         }
         case "compact_and_retry": {
           try {
-            await awaitWithDeadline(
-              forceCompact(messages, workspaceRoot, "context overflow recovery", generateText),
-              deadlineAt,
+            await waitForOperation(
+              forceCompact(
+                messages,
+                workspaceRoot,
+                "context overflow recovery",
+                generateText,
+                options.signal,
+              ),
+              options,
+              "compaction",
             );
             usageTracker = undefined;
           } catch (error) {
+            if (error instanceof ExecutionStoppedError) throw error;
             if (isDeadlineError(error, deadlineAt)) return timedOut();
             return {
               stopReason: "error",
@@ -492,13 +578,16 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
         }
         case "backoff_and_retry": {
           if (action.nextModel !== undefined) activeModel = action.nextModel;
-          await awaitWithDeadline(sleep(action.delayMs), deadlineAt);
+          await cancellableDelay(action.delayMs, options.signal);
           recoveryState = action.nextState;
           continue;
         }
         case "abort": {
           return {
-            stopReason: "error",
+            stopReason:
+              outcome.kind === "success" && outcome.response.stopReason === "length"
+                ? "length"
+                : "error",
             content: stopContent(action.message),
           };
         }
@@ -533,18 +622,47 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
       }
 
       const results: ToolResultMessage[] = [];
-      for (const block of response.content) {
-        if (block.type !== "toolCall") continue;
-        throwIfDeadlineExpired(deadlineAt);
-        const execution = await executeToolUseBlock({
-          agent,
-          block,
-          deadlineAt,
-          loopOptions: options,
-          timedOut,
-        });
-        if (execution.kind === "timeout") return execution.result;
-        results.push(execution.result);
+      const calls = response.content.filter(
+        (block): block is ToolCall => block.type === "toolCall",
+      );
+      if (!calls.length)
+        return {
+          stopReason: "error",
+          content: stopContent("Provider returned toolUse without tool calls."),
+        };
+      try {
+        for (const block of calls) {
+          throwIfAborted(options.signal);
+          throwIfDeadlineExpired(deadlineAt);
+          const execution = await executeToolUseBlock({
+            agent,
+            block,
+            deadlineAt,
+            loopOptions: options,
+            timedOut,
+          });
+          if (execution.kind === "timeout")
+            throw new ExecutionStoppedError("timeout", `tool:${block.id}`);
+          results.push(execution.result);
+        }
+      } catch (error) {
+        if (error instanceof ExecutionStoppedError || isDeadlineError(error, deadlineAt)) {
+          for (const block of calls.slice(results.length)) {
+            const dispatched =
+              error instanceof ExecutionStoppedError && error.resource === `tool:${block.id}`;
+            results.push(
+              toolResult(
+                block,
+                dispatched
+                  ? "结果未知：运行已停止等待，工具可能仍在执行。"
+                  : "未执行：运行已取消。",
+                true,
+              ),
+            );
+          }
+          messages.push(...results);
+        }
+        throw error;
       }
 
       const followups: UserMessage[] = [];
@@ -553,6 +671,8 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
       messages.push(...payload.results, ...payload.followups);
     }
   } catch (error) {
+    if (error instanceof ExecutionStoppedError)
+      return { stopReason: error.reason, content: stopContent(error.message) };
     if (isDeadlineError(error, deadlineAt)) return timedOut();
     throw error;
   }

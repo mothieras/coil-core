@@ -891,14 +891,20 @@ test("SessionController records subagent started and finished projections", asyn
 
 test("SessionController.close marks running subagents interrupted before closing", async () => {
   const workspace = await tempWorkspace();
-  const provider = fakeProvider((request) => {
+  const provider = fakeProvider((request, call) => {
     const messages = request.messages;
     const last = messages[messages.length - 1];
     if (messages.length === 1 && last?.role === "user" && last.content === "spawn slow reviewer") {
       return toolUseResponse("subagent", { prompt: "slow review" });
     }
     if (messages.length === 1 && last?.role === "user" && last.content === "slow review") {
-      return new Promise<AssistantMessage>(() => {});
+      return new Promise<AssistantMessage>((_resolve, reject) => {
+        call.options?.signal?.addEventListener(
+          "abort",
+          () => reject(call.options?.signal?.reason),
+          { once: true },
+        );
+      });
     }
     return textResponse("lead done");
   });
@@ -1288,8 +1294,10 @@ test("SessionController subscribers receive normalized conversation and tool eve
       events.map((event) => event.type),
       [
         "user_message_added",
+        "run_changed",
         "tool_started",
         "tool_finished",
+        "run_changed",
         "assistant_message_added",
         "session_titled",
       ],
@@ -1314,7 +1322,7 @@ test("SessionController subscribers receive normalized conversation and tool eve
       path: ".coil/sessions/session_view_tool/report.md",
       createdAt: "2026-01-01T00:00:00.000Z",
     });
-    assert.equal(events.length, 5);
+    assert.equal(events.length, 7);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

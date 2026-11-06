@@ -5,6 +5,19 @@ import assert from "node:assert/strict";
 
 const toolsRoot = path.join(process.cwd(), "src", "core", "tools");
 
+test("tools never import Agent, Session, currentAgent or the subagent coordinator", async () => {
+  const files = await readdir(toolsRoot, { recursive: true });
+  for (const file of files.filter((file) => file.endsWith(".ts"))) {
+    const source = await readFile(path.join(toolsRoot, file), "utf8");
+    assert.doesNotMatch(
+      source,
+      /from [\'"][^\'"]*\/(?:agent\/(?:agent|runtime|subagent|subagentRunner)|session\/[^\'"]+)\.js[\'"]/,
+      file,
+    );
+    assert.doesNotMatch(source, /\bcurrentAgent\b/, file);
+  }
+});
+
 test("builtins aggregates per-tool factories instead of a central handler file", async () => {
   const builtinsSource = await readFile(path.join(toolsRoot, "builtins.ts"), "utf8");
 

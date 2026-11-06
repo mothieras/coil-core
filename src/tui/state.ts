@@ -127,6 +127,21 @@ export function logFromSnapshot(snapshot: SessionSnapshot): LogItem[] {
 
 function logItemFromEvent(event: SessionViewEvent): LogItem | null {
   switch (event.type) {
+    case "run_changed":
+      if (event.run.status !== "stopping" && event.run.status !== "interrupted") return null;
+      return {
+        id: `run:${event.run.id}:${event.run.status}`,
+        kind: "session",
+        title: "run",
+        status:
+          event.run.status === "stopping"
+            ? "stopping"
+            : event.run.cleanup?.status === "unconfirmed"
+              ? "stop unconfirmed"
+              : "stopped",
+        detail: event.run.stopReason ?? "",
+        timestamp: event.timestamp,
+      };
     case "user_message_added":
     case "assistant_message_added":
     case "system_message_added":

@@ -1,3 +1,4 @@
+import { throwIfAborted } from "../../loop/cancellation.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { McpServerConfig } from "./config.js";
 import type { McpClient, McpToolResult, McpToolSchema } from "./types.js";
@@ -82,6 +83,8 @@ export class StdioMcpClient implements McpClient {
   private initialized = false;
   private initializing: Promise<void> | null = null;
   private nextId = 1;
+  private closing = false;
+  private closePromise?: Promise<void>;
   private readonly stream = new JsonRpcStream();
 
   constructor(private readonly config: McpServerConfig) {}
@@ -93,8 +96,14 @@ export class StdioMcpClient implements McpClient {
     return Array.isArray(tools) ? (tools as McpToolSchema[]) : [];
   }
 
-  async callTool(name: string, input: unknown): Promise<McpToolResult> {
+  async callTool(
+    name: string,
+    input: unknown,
+    options?: { signal?: AbortSignal | undefined },
+  ): Promise<McpToolResult> {
+    throwIfAborted(options?.signal);
     await this.ensureInitialized();
+    throwIfAborted(options?.signal);
     const result = await this.request("tools/call", {
       name,
       arguments: input,
@@ -102,15 +111,41 @@ export class StdioMcpClient implements McpClient {
     return result as McpToolResult;
   }
 
-  async close(): Promise<void> {
-    this.child?.kill();
-    this.child = null;
-    this.initialized = false;
-    this.initializing = null;
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
     this.stream.rejectAll(new Error("MCP client closed."));
+    const child = this.child;
+    this.closePromise = (async () => {
+      if (!child || child.exitCode !== null || child.signalCode !== null) return;
+      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const wait = async (ms: number) => {
+        try {
+          await Promise.race([
+            exited,
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, ms);
+            }),
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      child.kill("SIGTERM");
+      await wait(2_000);
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await wait(1_000);
+      }
+      if (child.exitCode === null && child.signalCode === null)
+        throw new Error("MCP server stop unconfirmed");
+    })();
+    return this.closePromise;
   }
 
   private async ensureInitialized(): Promise<void> {
+    if (this.closing) throw new Error("MCP client closed.");
     if (this.initialized) return;
     if (!this.initializing) {
       this.initializing = this.initialize().catch((error) => {
@@ -159,6 +194,7 @@ export class StdioMcpClient implements McpClient {
   }
 
   private ensureStarted(): ChildProcessWithoutNullStreams {
+    if (this.closing) throw new Error("MCP client closed.");
     if (this.child) return this.child;
     const child = spawn(this.config.command, this.config.args, {
       env: { ...process.env, ...this.config.env },

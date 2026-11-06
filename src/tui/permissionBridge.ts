@@ -8,7 +8,12 @@ export type PermissionRequest = {
 };
 
 export type PermissionBridge = {
-  request(toolName: string, input: Record<string, unknown>, reason: string): Promise<boolean>;
+  request(
+    toolName: string,
+    input: Record<string, unknown>,
+    reason: string,
+    context?: { signal?: AbortSignal | undefined },
+  ): Promise<boolean>;
   resolve(requestId: string, allow: boolean): void;
   current(): PermissionRequest | null;
   subscribe(listener: () => void): () => void;
@@ -35,13 +40,28 @@ export function createPermissionBridge(): PermissionBridge {
   };
 
   return {
-    request(toolName, input, reason) {
+    request(toolName, input, reason, context) {
+      if (context?.signal?.aborted) return Promise.resolve(false);
       counter += 1;
       const req: PermissionRequest = { id: `perm-${counter}`, toolName, reason, input };
       const summary = summarizeInput(input);
       if (summary !== undefined) req.inputSummary = summary;
       const promise = new Promise<boolean>((resolve) => {
-        queue.push({ req, resolve });
+        const onAbort = () => {
+          const index = queue.findIndex((entry) => entry.req.id === req.id);
+          if (index >= 0) queue.splice(index, 1);
+          resolve(false);
+          updateQueueSize();
+          notify();
+        };
+        context?.signal?.addEventListener("abort", onAbort, { once: true });
+        queue.push({
+          req,
+          resolve: (allow) => {
+            context?.signal?.removeEventListener("abort", onAbort);
+            resolve(allow);
+          },
+        });
       });
       updateQueueSize();
       notify();
