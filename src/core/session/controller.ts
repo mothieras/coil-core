@@ -9,7 +9,11 @@ import {
   throwIfAborted,
 } from "../loop/cancellation.js";
 import { registerRuntimeHooks as installRuntimeHooks } from "../hooks/runtimeHooks.js";
-import { type RuntimeLifecycleEvent, type RuntimeLifecycleSink } from "../agent/lifecycle.js";
+import type {
+  RuntimeCheckpoint,
+  RuntimeLifecycleEvent,
+  RuntimeLifecycleSink,
+} from "../agent/lifecycle.js";
 import type { CheckPermissionFn } from "../permission/types.js";
 import type { Provider } from "../providers/index.js";
 import { createLeadAgent } from "./leadAgent.js";
@@ -20,18 +24,28 @@ import type { TaskRecord } from "../tools/task/taskManager.js";
 import type { ToolProviderLoadResult } from "../tools/types.js";
 import type { SessionCommandResult, SessionCompactResult } from "./commands/actions.js";
 import { SessionStore } from "./store/sessionStore.js";
+import { SessionJournal } from "./store/sessionJournal.js";
+import { SessionPersistence } from "./store/sessionPersistence.js";
 import type { SessionViewEventListener } from "./viewEvents.js";
 import {
   createSessionEvent,
   createSessionRecord,
   type ReportProjection,
+  type RecoveryResolution,
+  type RecoveryResolvedEvent,
   type SessionClosedEvent,
   type SessionCreatedEvent,
   type SessionRecord,
+  type SessionRecoveredEvent,
+  type SessionRecovery,
   type SessionResumedEvent,
   type SessionSnapshot,
+  type ToolExecutionIntendedEvent,
+  type ToolExecutionRecordedEvent,
 } from "./types.js";
 import { SessionProjectionStore } from "./projection/projectionStore.js";
+import { applySessionEvents, createEmptySessionSnapshot } from "./projection/projection.js";
+import { findUnresolvedOperations, pairRecoveredMessages, recoveryWarnings } from "./recovery.js";
 import {
   taskChangedEvent,
   backgroundStartedEvent,
@@ -42,6 +56,7 @@ import {
   runtimeLifecycleRecordedEvent,
   leadAgentStateSavedEvent,
   sessionTitledEvent,
+  conversationMessageEvent,
 } from "./sessionEvents.js";
 import { textGenerator } from "../providers/index.js";
 import { SessionCommands } from "./commands/commands.js";
@@ -76,6 +91,7 @@ type BuildSessionControllerOptions = {
   session: SessionRecord;
   workspaceRoot: string;
   store: SessionStore;
+  journal: SessionJournal;
   leadAgent?: Agent | undefined;
   checkPermission?: CheckPermissionFn | undefined;
   provider?: Provider | undefined;
@@ -86,6 +102,7 @@ type BuildSessionControllerOptions = {
 
 export class SessionController implements RuntimeLifecycleSink {
   private readonly projectionStore: SessionProjectionStore;
+  private readonly persistence: SessionPersistence;
   private runner!: SessionRunner;
   private commands!: SessionCommands;
   private running = false;
@@ -99,6 +116,13 @@ export class SessionController implements RuntimeLifecycleSink {
     if (this.closing) throw new Error("Session is closing");
   }
 
+  private assertRecoveryClear(): void {
+    if (this.getSnapshot().recovery?.pending.length)
+      throw new Error(
+        "Execution outcome unknown. Use /recover or resolveRecovery before continuing.",
+      );
+  }
+
   cancelRun(runId?: string): Promise<CancelRunResult> {
     const target =
       runId ?? this.getSnapshot().agentRuns.findLast((run) => run.agentKind === "lead")?.id;
@@ -109,11 +133,12 @@ export class SessionController implements RuntimeLifecycleSink {
   private constructor(
     private readonly session: SessionRecord,
     private readonly leadAgent: Agent,
-    private readonly store: SessionStore,
     private readonly app: AppContext,
     projectionStore: SessionProjectionStore,
+    persistence: SessionPersistence,
   ) {
     this.projectionStore = projectionStore;
+    this.persistence = persistence;
   }
 
   static async createNew(options: CreateSessionControllerOptions): Promise<SessionController> {
@@ -128,6 +153,7 @@ export class SessionController implements RuntimeLifecycleSink {
       session,
       workspaceRoot: options.workspaceRoot,
       store,
+      journal: new SessionJournal(store.pathForSession(session.id), session.id),
       leadAgent: options.leadAgent,
       checkPermission: options.checkPermission,
       provider: options.provider,
@@ -136,7 +162,6 @@ export class SessionController implements RuntimeLifecycleSink {
     if (options.onSessionEvent !== undefined) {
       controller.subscribe(options.onSessionEvent);
     }
-    await store.create(session);
     controller.projectionStore.record(
       createSessionEvent<SessionCreatedEvent>({
         type: "session_created",
@@ -146,25 +171,56 @@ export class SessionController implements RuntimeLifecycleSink {
       }),
     );
     controller.recordMcpProviderDiagnostics();
+    await controller.persistence.confirm(() => {});
+    await store.create(session);
     return controller;
   }
 
   static async resume(options: ResumeSessionControllerOptions): Promise<SessionController> {
     const store = options.store ?? new SessionStore(options.workspaceRoot);
-    const session = await store.loadSession(options.sessionId);
-    const leadMessages = await store.loadLeadAgentMessages(options.sessionId);
-    const snapshot = await store.loadSnapshot(options.sessionId);
+    const id = options.sessionId;
+    const journal = new SessionJournal(store.pathForSession(id), id);
+    const recovered = await journal.load();
+    const snapshot = recovered
+      ? applySessionEvents(createEmptySessionSnapshot(), recovered.events)
+      : createEmptySessionSnapshot();
+    const session = recovered ? snapshot.session : await store.loadSession(id);
+    if (!session || session.id !== id) throw new Error(`Invalid session record for ${id}`);
+    const legacy = recovered ? undefined : await store.loadSnapshot(id);
+    const recovery: SessionRecovery = {
+      pending: recovered ? findUnresolvedOperations(snapshot, recovered.events) : [],
+      ...(!recovered ? { legacy: true } : {}),
+      ...(journal.discardedBytes > 0 ? { ignoredJournalBytes: journal.discardedBytes } : {}),
+      ...(recovered?.awaitingModel ? { modelResponseUnconfirmed: true } : {}),
+    };
+    const leadMessages = pairRecoveredMessages(
+      recovered?.messages ?? (await store.loadLeadAgentMessages(id)),
+      recovery,
+      snapshot.agentRuns.findLast((run) => run.agentKind === "lead")?.id,
+    );
     const controller = SessionController.build({
       session,
       workspaceRoot: options.workspaceRoot,
       store,
+      journal,
       checkPermission: options.checkPermission,
       provider: options.provider,
       leadMessages,
       snapshot,
       toolProviderResults: options.toolProviderResults,
     });
-    controller.clearMcpProviderDiagnostics();
+    if (legacy) {
+      controller.projectionStore.record(
+        createSessionEvent<SessionCreatedEvent>({
+          type: "session_created",
+          sessionId: id,
+          timestamp: session.createdAt,
+          session,
+        }),
+      );
+      for (const message of legacy.conversationMessages)
+        controller.projectionStore.record(conversationMessageEvent(message));
+    }
     if (options.onSessionEvent !== undefined) {
       controller.subscribe(options.onSessionEvent);
     }
@@ -174,6 +230,14 @@ export class SessionController implements RuntimeLifecycleSink {
         sessionId: session.id,
       }),
     );
+    controller.projectionStore.record(
+      createSessionEvent<SessionRecoveredEvent>({
+        type: "session_recovered",
+        sessionId: id,
+        recovery,
+      }),
+    );
+    controller.saveLeadAgentState();
     controller.recordMcpProviderDiagnostics();
     return controller;
   }
@@ -181,9 +245,10 @@ export class SessionController implements RuntimeLifecycleSink {
   private static build(options: BuildSessionControllerOptions): SessionController {
     // eslint-disable-next-line prefer-const
     let controller: SessionController;
-    const agentRuntime = new AgentRuntime({
-      emit: (event) => controller.emit(event),
-    });
+    const agentRuntime = new AgentRuntime(
+      { emit: (event) => controller.emit(event) },
+      (checkpoint, messages, signal) => controller.confirmCheckpoint(checkpoint, messages, signal),
+    );
     const app = createAppContext(options.workspaceRoot, {
       taskStateDir: options.store.sessionTasksPath(options.session.id),
       agentRuntime,
@@ -207,9 +272,15 @@ export class SessionController implements RuntimeLifecycleSink {
     controller = new SessionController(
       options.session,
       leadAgent,
-      options.store,
       app,
       projectionStore,
+      new SessionPersistence(
+        options.session.id,
+        options.journal,
+        projectionStore,
+        options.store,
+        leadAgent.messages,
+      ),
     );
     app.inbox.subscribe((n) => controller.recordAsyncWork(n));
     controller.runner = new SessionRunner({
@@ -218,6 +289,7 @@ export class SessionController implements RuntimeLifecycleSink {
       agentRuntime,
       store: projectionStore,
       app,
+      captureLead: () => controller.persistence.setLead(leadAgent.messages),
     });
     controller.commands = new SessionCommands({
       signal: controller.auxiliary.signal,
@@ -236,12 +308,65 @@ export class SessionController implements RuntimeLifecycleSink {
     this.projectionStore.record(runtimeLifecycleRecordedEvent(this.session.id, runtimeEvent));
   }
 
+  private async confirmCheckpoint(
+    checkpoint: RuntimeCheckpoint,
+    messages: readonly Message[],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const { run, type } = checkpoint;
+    if (run.sessionId !== this.session.id) return;
+    if (type !== "tool_result") {
+      throwIfAborted(signal);
+      this.assertRecoveryClear();
+    }
+    const applyLead =
+      run.agentKind === "lead"
+        ? this.persistence.captureLead(messages, type === "model_request")
+        : undefined;
+    const sessionId = this.session.id;
+    await this.persistence.confirm(
+      () => {
+        applyLead?.();
+        if (type === "tool_intent") {
+          this.projectionStore.record(
+            createSessionEvent<ToolExecutionIntendedEvent>({
+              id: checkpoint.id,
+              type: "tool_execution_intended",
+              sessionId,
+              operation: {
+                id: checkpoint.id,
+                kind: "tool",
+                name: checkpoint.toolName,
+                toolCallId: checkpoint.toolCallId,
+                runId: run.runId,
+                agentKind: run.agentKind,
+              },
+            }),
+          );
+        } else if (type === "tool_result") {
+          this.projectionStore.record(
+            createSessionEvent<ToolExecutionRecordedEvent>({
+              type: "tool_execution_recorded",
+              sessionId,
+              intentId: checkpoint.id,
+              status: checkpoint.status,
+              uncertain: checkpoint.uncertain,
+            }),
+          );
+        }
+      },
+      type === "tool_result" ? undefined : signal,
+    );
+  }
+
   async handleUserMessage(text: string): Promise<SessionTurnResult> {
     return this.runTurn(() => this.runner.runUserTurn(text), text);
   }
 
   private async runTurn<T>(operation: () => Promise<T>, title?: string): Promise<T> {
     this.assertOpen();
+    this.assertRecoveryClear();
+    this.persistence.assertWritable();
     if (this.running || this.editingContext)
       throw new Error("Session already has an active turn or compaction");
     this.running = true;
@@ -256,11 +381,16 @@ export class SessionController implements RuntimeLifecycleSink {
         errors.push(error);
       }
       try {
-        this.saveLeadAgentState();
-        if (title !== undefined && !this.closing) await this.maybeAutoTitle(title);
-        if (!this.closing) await this.flush();
+        if (!this.persistence.failure) {
+          this.saveLeadAgentState();
+          if (title !== undefined && !errors.length && !this.closing)
+            await this.maybeAutoTitle(title);
+          if (!this.closing) await this.persistence.flush();
+        } else if (!errors.includes(this.persistence.failure.cause)) {
+          errors.push(this.persistence.failure.cause);
+        }
       } catch (error) {
-        errors.push(error);
+        if (!errors.includes(error)) errors.push(error);
       }
       if (errors.length === 1) throw errors[0];
       if (errors.length) throw new AggregateError(errors, "Turn and cleanup failed");
@@ -277,7 +407,7 @@ export class SessionController implements RuntimeLifecycleSink {
    * title — titling must never break a turn.
    */
   private async maybeAutoTitle(firstMessage: string): Promise<void> {
-    if (this.session.title !== "Untitled session" || this.closing) return;
+    if (this.getSnapshot().session?.title !== "Untitled session" || this.closing) return;
     try {
       // Generous budget: reasoning models spend a thinking block before the
       // text block, and a tight budget ends the response mid-thought with no
@@ -293,9 +423,6 @@ export class SessionController implements RuntimeLifecycleSink {
       throwIfAborted(this.auxiliary.signal);
       const title = text.split("\n")[0]?.trim().slice(0, 60);
       if (!title) return;
-      this.session.title = title;
-      this.session.updatedAt = new Date().toISOString();
-      await this.store.create(this.session);
       this.projectionStore.record(sessionTitledEvent(this.session.id, title));
     } catch {
       // keep the default title
@@ -317,6 +444,7 @@ export class SessionController implements RuntimeLifecycleSink {
   }
 
   hasPendingAsyncWork(): boolean {
+    if (this.getSnapshot().recovery?.pending.length || this.persistence.failure) return false;
     return this.runner.hasPendingAsyncWork();
   }
 
@@ -337,7 +465,10 @@ export class SessionController implements RuntimeLifecycleSink {
 
   async compact(reason = "manual slash command"): Promise<SessionCompactResult> {
     this.assertOpen();
+    this.assertRecoveryClear();
+    this.persistence.assertWritable();
     if (this.editingContext) throw new Error("Session compaction is already running");
+    if (this.running) return this.commands.compact(reason);
     this.editingContext = true;
     try {
       const result = await this.auxiliary.wait(this.commands.compact(reason), "manual-compaction");
@@ -345,7 +476,7 @@ export class SessionController implements RuntimeLifecycleSink {
       return result;
     } finally {
       this.editingContext = false;
-      if (!this.closing) await this.flush();
+      if (!this.closing) await this.persistence.flush();
     }
   }
 
@@ -372,9 +503,68 @@ export class SessionController implements RuntimeLifecycleSink {
   async handleSlashCommand(command: string): Promise<SessionCommandResult> {
     this.assertOpen();
     if (/^\/compact(?:\s|$)/.test(command)) return this.compact();
+    if (/^\/recover(?:\s|$)/.test(command)) return this.handleRecoveryCommand(command);
     const result = await this.auxiliary.wait(this.commands.handle(command), "session-command");
-    await this.flush();
+    await this.persistence.flush();
     return result;
+  }
+
+  async resolveRecovery(id: string, resolution: RecoveryResolution): Promise<void> {
+    this.assertOpen();
+    if (this.running || this.editingContext) throw new Error("Session is busy");
+    if (resolution !== "verified" && resolution !== "discarded")
+      throw new Error("Choose verified or discarded for the unknown operation.");
+    if (!this.getSnapshot().recovery?.pending.some((item) => item.id === id))
+      throw new Error(`Unknown recovery operation ${id}. Use /recover to list operations.`);
+    this.editingContext = true;
+    try {
+      await this.persistence.confirm(() => {
+        this.projectionStore.record(
+          createSessionEvent<RecoveryResolvedEvent>({
+            type: "recovery_resolved",
+            sessionId: this.session.id,
+            operationId: id,
+            resolution,
+          }),
+        );
+      });
+    } finally {
+      this.editingContext = false;
+    }
+  }
+
+  private async handleRecoveryCommand(command: string): Promise<SessionCommandResult> {
+    const [, action, id, extra] = command.trim().split(/\s+/);
+    const title = "Session recovery";
+    if (!action) {
+      const recovery = this.getSnapshot().recovery;
+      const pending = recovery?.pending ?? [];
+      const lines = recovery ? recoveryWarnings(recovery) : [];
+      if (pending.length) {
+        for (const item of pending) {
+          lines.push(`${item.id}  ${item.name}  Outcome unknown`);
+          if (item.summary) lines.push(item.summary);
+        }
+        lines.push(
+          "After checking an operation, use /recover verify <id> or /recover discard <id>.",
+        );
+      } else {
+        lines.push("No operations need review.");
+      }
+      return { action: "notice", title, body: lines.join("\n") };
+    }
+    if ((action !== "verify" && action !== "discard") || !id || extra)
+      return {
+        action: "notice",
+        title,
+        body: "Use /recover verify <id> or /recover discard <id>.",
+      };
+    await this.resolveRecovery(id, action === "verify" ? "verified" : "discarded");
+    return {
+      action: "notice",
+      title,
+      body: action === "verify" ? "Verification recorded." : "Operation set aside.",
+    };
   }
 
   get appContext(): AppContext {
@@ -385,15 +575,10 @@ export class SessionController implements RuntimeLifecycleSink {
     return this.leadAgent;
   }
 
-  async flush(): Promise<void> {
-    const events = this.projectionStore.drainPending();
-    if (events.length > 0) {
-      await this.store.appendEvents(this.session.id, events);
-    }
-    const snapshot = this.projectionStore.getSnapshot();
-    await this.store.saveConversation(this.session.id, snapshot.conversationMessages);
-    await this.store.saveLeadMessages(this.session.id, this.leadAgent.messages);
-    await this.store.saveSnapshot(this.session.id, snapshot);
+  flush(): Promise<void> {
+    if (!this.running && !this.editingContext && !this.persistence.failure)
+      this.persistence.setLead(this.leadAgent.messages);
+    return this.persistence.flush(true);
   }
 
   close(): Promise<void> {
@@ -476,6 +661,7 @@ export class SessionController implements RuntimeLifecycleSink {
   }
 
   private saveLeadAgentState(): void {
+    this.persistence.setLead(this.leadAgent.messages);
     const updatedAt = new Date().toISOString();
     this.projectionStore.record(
       leadAgentStateSavedEvent(this.session.id, this.leadAgent.messages, updatedAt),
@@ -488,13 +674,6 @@ export class SessionController implements RuntimeLifecycleSink {
     for (const event of events) {
       this.projectionStore.record(event);
     }
-  }
-
-  private clearMcpProviderDiagnostics(): void {
-    this.projectionStore.replaceSnapshot({
-      ...this.projectionStore.getSnapshot(),
-      mcpServers: [],
-    });
   }
 
   private recordTaskChanged(task: TaskRecord): void {

@@ -1,4 +1,5 @@
 import { createEmptySessionSnapshot } from "../core/session/projection/projection.js";
+import { recoveryWarnings } from "../core/session/recovery.js";
 import type {
   ConversationRole,
   ConversationMessage,
@@ -122,7 +123,23 @@ export function logFromSnapshot(snapshot: SessionSnapshot): LogItem[] {
       timestamp: sv.updatedAt,
     });
   }
-  return items.sort(byTimestamp);
+  items.sort(byTimestamp);
+  if (snapshot.recovery) {
+    const detail = recoveryWarnings(snapshot.recovery);
+    if (snapshot.recovery.pending.length) {
+      detail.push(
+        "Execution outcome unknown. Use /recover to review operations before continuing.",
+      );
+    }
+    if (detail.length)
+      items.push({
+        id: "session:recovery",
+        kind: "info",
+        title: "Session recovery",
+        detail: detail.join("\n"),
+      });
+  }
+  return items;
 }
 
 function logItemFromEvent(event: SessionViewEvent): LogItem | null {
@@ -220,6 +237,7 @@ function logItemFromEvent(event: SessionViewEvent): LogItem | null {
     case "task_changed":
     case "compact_started":
     case "session_titled":
+    case "recovery_changed":
       return null;
   }
 }
@@ -235,7 +253,12 @@ function messageItem(m: ConversationMessage): LogItem {
 }
 
 function toolItem(t: ToolCallProjection): LogItem {
-  const it: LogItem = { id: `tool:${t.id}`, kind: "tool", title: t.toolName, status: t.status };
+  const it: LogItem = {
+    id: `tool:${t.runId}:${t.id}`,
+    kind: "tool",
+    title: t.toolName,
+    status: t.status,
+  };
   const ts = t.finishedAt ?? t.startedAt;
   if (ts !== undefined) it.timestamp = ts;
   if (t.inputSummary !== undefined) it.summary = t.inputSummary;

@@ -13,8 +13,8 @@ export class SessionProjectionStore {
 
   record(event: SessionEvent): void {
     this.pendingEvents.push(event);
-    this.snapshot = applySessionEvent(this.snapshot, event);
-    this.publish(event);
+    // A recovery decision releases an execution gate. Show it only after commit.
+    if (event.type !== "recovery_resolved") this.apply(event);
   }
 
   subscribe(listener: SessionViewEventListener): () => void {
@@ -28,12 +28,19 @@ export class SessionProjectionStore {
     return this.snapshot;
   }
 
-  drainPending(): SessionEvent[] {
-    return this.pendingEvents.splice(0, this.pendingEvents.length);
+  getPending(): readonly SessionEvent[] {
+    return this.pendingEvents.slice();
   }
 
-  replaceSnapshot(snapshot: SessionSnapshot): void {
-    this.snapshot = snapshot;
+  acknowledge(count: number): void {
+    for (const event of this.pendingEvents.splice(0, count)) {
+      if (event.type === "recovery_resolved") this.apply(event);
+    }
+  }
+
+  private apply(event: SessionEvent): void {
+    this.snapshot = applySessionEvent(this.snapshot, event);
+    this.publish(event);
   }
 
   private publish(event: SessionEvent): void {

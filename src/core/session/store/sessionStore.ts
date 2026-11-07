@@ -10,6 +10,8 @@ import type {
 } from "../types.js";
 import { createEmptySessionSnapshot } from "../projection/projection.js";
 import { importLegacyAnthropicMessages } from "./legacyMessages.js";
+import { writeAtomic } from "./atomicFile.js";
+import { hasJournalHeader } from "./sessionJournal.js";
 
 export type SessionListItem = {
   id: string;
@@ -19,8 +21,6 @@ export type SessionListItem = {
 };
 
 export class SessionStore {
-  private tmpCounter = 0;
-
   constructor(private readonly workspaceRoot: string) {}
 
   async create(record: SessionRecord): Promise<void> {
@@ -28,11 +28,15 @@ export class SessionStore {
     await this.writeJson(this.sessionRecordPath(record.id), record);
   }
 
+  /** Writes an unversioned event log. Checkpoint sessions are written by SessionController. */
   async appendEvents(sessionId: string, events: readonly SessionEvent[]): Promise<void> {
     if (events.length === 0) return;
     await this.ensureSessionDir(sessionId);
+    const file = this.eventsPath(sessionId);
+    if (await hasJournalHeader(file))
+      throw new Error("Use SessionController to record events in a checkpoint session.");
     const body = events.map((event) => JSON.stringify(event)).join("\n") + "\n";
-    await fs.appendFile(this.eventsPath(sessionId), body, "utf8");
+    await fs.appendFile(file, body, "utf8");
   }
 
   async saveConversation(
@@ -93,7 +97,19 @@ export class SessionStore {
 
   async loadLeadAgentMessages(sessionId: string): Promise<Message[]> {
     const data = await fs.readFile(this.leadMessagesPath(sessionId), "utf8");
-    return importLegacyAnthropicMessages(JSON.parse(data));
+    const raw: unknown = JSON.parse(data);
+    if (
+      !Array.isArray(raw) ||
+      raw.some(
+        (message) =>
+          !message ||
+          !["user", "assistant", "toolResult"].includes(message.role) ||
+          (typeof message.content !== "string" && !Array.isArray(message.content)),
+      )
+    ) {
+      throw new Error(`Invalid lead-messages.json for session ${sessionId}`);
+    }
+    return importLegacyAnthropicMessages(raw);
   }
 
   async loadSnapshot(sessionId: string): Promise<SessionSnapshot> {
@@ -134,17 +150,16 @@ export class SessionStore {
   }
 
   private async writeJson(filePath: string, value: unknown): Promise<void> {
-    // Write to a unique temp file then rename: rename is atomic on the same
-    // filesystem, so a crash mid-write (or an overlapping write to the same
-    // file) can never leave a truncated JSON that breaks resume.
-    const tmpPath = `${filePath}.${process.pid}.${this.tmpCounter++}.tmp`;
-    await fs.writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await fs.rename(tmpPath, filePath);
+    await writeAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`);
   }
 }
 
 function normalizeSnapshot(value: unknown): SessionSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Invalid session snapshot");
   const snapshot = value as Partial<SessionSnapshot>;
+  if (snapshot.conversationMessages !== undefined && !Array.isArray(snapshot.conversationMessages))
+    throw new Error("Invalid conversation in session snapshot");
   return {
     ...createEmptySessionSnapshot(),
     ...snapshot,

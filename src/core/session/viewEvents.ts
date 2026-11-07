@@ -38,6 +38,8 @@ export type SessionTitledViewEvent = SessionViewEventBase<"session_titled"> & {
   title: string;
 };
 
+export type RecoveryChangedViewEvent = SessionViewEventBase<"recovery_changed">;
+
 export type ConversationMessageViewEvent = SessionViewEventBase<
   "user_message_added" | "assistant_message_added" | "system_message_added"
 > & {
@@ -130,6 +132,7 @@ export type SessionViewEvent =
   | SessionStartedViewEvent
   | SessionFinishedViewEvent
   | SessionTitledViewEvent
+  | RecoveryChangedViewEvent
   | ConversationMessageViewEvent
   | ToolStartedViewEvent
   | ToolFinishedViewEvent
@@ -181,6 +184,9 @@ export function toSessionViewEvents(
         : [];
     case "session_titled":
       return [{ ...base(event, "session_titled"), title: event.title }];
+    case "session_recovered":
+    case "recovery_resolved":
+      return [base(event, "recovery_changed")];
     case "conversation_message_added":
       return [conversationMessageViewEvent(event, event.message)];
     case "runtime_lifecycle_recorded":
@@ -202,6 +208,8 @@ export function toSessionViewEvents(
     case "mcp_server_failed":
       return [{ ...base(event, "mcp_server_failed"), server: event.server }];
     case "lead_agent_state_saved":
+    case "tool_execution_intended":
+    case "tool_execution_recorded":
       return [];
   }
 }
@@ -244,8 +252,9 @@ function runtimeLifecycleViewEvents(
         {
           ...base(event, "tool_started"),
           toolCall:
-            snapshot.toolCalls.find((call) => call.id === runtimeEvent.toolCallId) ??
-            toolCallFromStartedEvent(event.sessionId, runtimeEvent),
+            snapshot.toolCalls.find(
+              (call) => call.id === runtimeEvent.toolCallId && call.runId === runtimeEvent.runId,
+            ) ?? toolCallFromStartedEvent(event.sessionId, runtimeEvent),
         },
       ];
     case "tool_finished":
@@ -253,8 +262,9 @@ function runtimeLifecycleViewEvents(
         {
           ...base(event, "tool_finished"),
           toolCall:
-            snapshot.toolCalls.find((call) => call.id === runtimeEvent.toolCallId) ??
-            toolCallFromFinishedEvent(event.sessionId, runtimeEvent),
+            snapshot.toolCalls.find(
+              (call) => call.id === runtimeEvent.toolCallId && call.runId === runtimeEvent.runId,
+            ) ?? toolCallFromFinishedEvent(event.sessionId, runtimeEvent),
         },
       ];
     case "permission_requested":

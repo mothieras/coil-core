@@ -29,6 +29,7 @@ type SessionRunnerDeps = {
   agentRuntime: AgentRuntime;
   store: SessionProjectionStore;
   app: AppContext;
+  captureLead: () => void;
 };
 
 export class SessionRunner {
@@ -37,6 +38,7 @@ export class SessionRunner {
   private readonly agentRuntime: AgentRuntime;
   private readonly store: SessionProjectionStore;
   private readonly app: AppContext;
+  private readonly captureLead: () => void;
 
   constructor(deps: SessionRunnerDeps) {
     this.sessionId = deps.sessionId;
@@ -44,6 +46,7 @@ export class SessionRunner {
     this.agentRuntime = deps.agentRuntime;
     this.store = deps.store;
     this.app = deps.app;
+    this.captureLead = deps.captureLead;
   }
 
   async runUserTurn(text: string): Promise<SessionUserTurnResult> {
@@ -54,8 +57,9 @@ export class SessionRunner {
       content: text,
       source: "user_input",
     });
-    this.store.record(conversationMessageEvent(userMessage));
     this.leadAgent.messages.push({ role: "user", content: text, timestamp: Date.now() });
+    this.captureLead();
+    this.store.record(conversationMessageEvent(userMessage));
 
     const run = createAgentRun({
       sessionId: this.sessionId,
@@ -72,6 +76,7 @@ export class SessionRunner {
       content,
       source: "agent_result",
     });
+    this.captureLead();
     this.store.record(conversationMessageEvent(assistantMessage));
     return { run, result, userMessage, assistantMessage };
   }
@@ -93,6 +98,7 @@ export class SessionRunner {
       content: run.resultSummary ?? describeFinalResponse(result.content, result.stopReason),
       source: "agent_result",
     });
+    this.captureLead();
     this.store.record(conversationMessageEvent(assistantMessage));
     return { run, result, assistantMessage };
   }

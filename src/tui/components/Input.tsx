@@ -15,6 +15,7 @@ const COMMANDS: readonly CommandSuggestion[] = [
   { command: "/tasks", description: "list tasks" },
   { command: "/subagents", description: "list subagents" },
   { command: "/resume", description: "switch session" },
+  { command: "/recover", description: "review unknown outcomes" },
   { command: "/ping", description: "check provider" },
   { command: "/compact", description: "compact context" },
   { command: "/report", description: "write report" },

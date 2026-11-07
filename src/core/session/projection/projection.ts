@@ -6,6 +6,7 @@ import type {
   SessionSnapshot,
   ToolCallProjection,
 } from "../types.js";
+import { applySessionRecovery } from "../recovery.js";
 
 export function createEmptySessionSnapshot(): SessionSnapshot {
   return {
@@ -35,7 +36,23 @@ export function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent
       return {
         ...snapshot,
         session: resumeSession(snapshot, event.timestamp),
+        mcpServers: [],
       };
+    case "session_recovered":
+      return applySessionRecovery(snapshot, event.recovery, event.timestamp);
+    case "recovery_resolved":
+      return snapshot.recovery
+        ? {
+            ...snapshot,
+            recovery: {
+              ...snapshot.recovery,
+              pending: snapshot.recovery.pending.filter((item) => item.id !== event.operationId),
+            },
+          }
+        : snapshot;
+    case "tool_execution_intended":
+    case "tool_execution_recorded":
+      return snapshot;
     case "session_closed":
       return {
         ...snapshot,
@@ -197,7 +214,9 @@ function applyRuntimeLifecycleEvent(
       };
     }
     case "tool_finished": {
-      const existing = snapshot.toolCalls.find((call) => call.id === runtimeEvent.toolCallId);
+      const existing = snapshot.toolCalls.find(
+        (call) => call.id === runtimeEvent.toolCallId && call.runId === runtimeEvent.runId,
+      );
       const updated: ToolCallProjection = existing
         ? { ...existing }
         : {
@@ -283,7 +302,7 @@ function upsertToolCall(
   calls: readonly ToolCallProjection[],
   call: ToolCallProjection,
 ): ToolCallProjection[] {
-  const index = calls.findIndex((item) => item.id === call.id);
+  const index = calls.findIndex((item) => item.id === call.id && item.runId === call.runId);
   if (index === -1) return [...calls, call];
   return calls.map((item, idx) => (idx === index ? call : item));
 }

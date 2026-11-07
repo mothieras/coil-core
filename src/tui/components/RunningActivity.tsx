@@ -31,7 +31,7 @@ export function RunningActivity({
 }): React.ReactElement | null {
   const rows: ActivityRow[] = [
     ...selectRunningTools(snapshot).map((tool) => ({
-      id: `tool:${tool.id}`,
+      id: `tool:${tool.runId}:${tool.id}`,
       marker: TUI_SYMBOLS.branch,
       label: humanizeIdentifier(tool.toolName),
       summary: tool.inputSummary,

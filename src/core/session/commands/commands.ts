@@ -67,7 +67,7 @@ export class SessionCommands {
         return {
           action: "notice",
           title: "Help",
-          body: "/help /status /tasks /subagents /ping /compact /report /exit",
+          body: "/help /status /tasks /subagents /recover /ping /compact /report /exit",
         };
       case "status":
         return {

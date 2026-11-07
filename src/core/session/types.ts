@@ -157,6 +157,20 @@ export type SessionUsageTotals = {
   lastInputTokens: number;
 };
 
+export type RecoveryOperation = { id: string; name: string; summary?: string } & (
+  | { kind: "tool"; runId: string; toolCallId: string; agentKind: AgentKind }
+  | { kind: "background" | "subagent" }
+);
+
+export type RecoveryResolution = "verified" | "discarded";
+
+export type SessionRecovery = {
+  pending: RecoveryOperation[];
+  legacy?: true;
+  ignoredJournalBytes?: number;
+  modelResponseUnconfirmed?: true;
+};
+
 export type SessionSnapshot = {
   session: SessionRecord | null;
   conversationMessages: ConversationMessage[];
@@ -170,6 +184,7 @@ export type SessionSnapshot = {
   reports: ReportProjection[];
   mcpServers: McpServerProjection[];
   usage: SessionUsageTotals;
+  recovery?: SessionRecovery;
 };
 
 export type SessionEventType =
@@ -187,7 +202,11 @@ export type SessionEventType =
   | "subagent_finished"
   | "report_written"
   | "mcp_server_connected"
-  | "mcp_server_failed";
+  | "mcp_server_failed"
+  | "tool_execution_intended"
+  | "tool_execution_recorded"
+  | "session_recovered"
+  | "recovery_resolved";
 
 export type SessionEventBase<Type extends SessionEventType> = {
   id: string;
@@ -252,6 +271,25 @@ export type McpServerFailedEvent = SessionEventBase<"mcp_server_failed"> & {
   server: McpServerProjection;
 };
 
+export type ToolExecutionIntendedEvent = SessionEventBase<"tool_execution_intended"> & {
+  operation: Extract<RecoveryOperation, { kind: "tool" }>;
+};
+
+export type ToolExecutionRecordedEvent = SessionEventBase<"tool_execution_recorded"> & {
+  intentId: string;
+  status: ToolResultStatus;
+  uncertain: boolean;
+};
+
+export type SessionRecoveredEvent = SessionEventBase<"session_recovered"> & {
+  recovery: SessionRecovery;
+};
+
+export type RecoveryResolvedEvent = SessionEventBase<"recovery_resolved"> & {
+  operationId: string;
+  resolution: RecoveryResolution;
+};
+
 export type SessionEvent =
   | SessionCreatedEvent
   | SessionResumedEvent
@@ -267,7 +305,11 @@ export type SessionEvent =
   | SubagentFinishedEvent
   | ReportWrittenEvent
   | McpServerConnectedEvent
-  | McpServerFailedEvent;
+  | McpServerFailedEvent
+  | ToolExecutionIntendedEvent
+  | ToolExecutionRecordedEvent
+  | SessionRecoveredEvent
+  | RecoveryResolvedEvent;
 
 export type NewSessionEvent<Event extends SessionEvent = SessionEvent> = Omit<
   Event,

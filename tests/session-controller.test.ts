@@ -10,12 +10,6 @@ import { SessionController } from "../src/core/session/controller.js";
 import type { SessionCompactResult } from "../src/core/session/commands/actions.js";
 import { createEmptySessionSnapshot } from "../src/core/session/projection/projection.js";
 import { SessionStore, sessionPath } from "../src/core/session/store/sessionStore.js";
-import type {
-  ConversationMessage,
-  SessionEvent,
-  SessionRecord,
-  SessionSnapshot,
-} from "../src/core/session/types.js";
 import { createSessionRecord } from "../src/core/session/types.js";
 import type { SessionViewEvent } from "../src/core/session/viewEvents.js";
 import {
@@ -52,37 +46,6 @@ function testLeadAgent(
     toolRuntime: emptyRuntime(),
     provider: fakeProvider(() => createMessage()),
   });
-}
-
-class FlakyFlushStore extends SessionStore {
-  readonly appendedEventIds: string[][] = [];
-  private failConversation = true;
-
-  constructor(workspaceRoot: string) {
-    super(workspaceRoot);
-  }
-
-  override async create(_record: SessionRecord): Promise<void> {}
-
-  override async appendEvents(_sessionId: string, events: readonly SessionEvent[]): Promise<void> {
-    this.appendedEventIds.push(events.map((event) => event.id));
-  }
-
-  override async saveConversation(
-    _sessionId: string,
-    _messages: readonly ConversationMessage[],
-  ): Promise<void> {
-    if (!this.failConversation) return;
-    this.failConversation = false;
-    throw new Error("transient save failure");
-  }
-
-  override async saveLeadMessages(
-    _sessionId: string,
-    _messages: readonly Message[],
-  ): Promise<void> {}
-
-  override async saveSnapshot(_sessionId: string, _snapshot: SessionSnapshot): Promise<void> {}
 }
 
 async function tempWorkspace(): Promise<string> {
@@ -674,7 +637,8 @@ test("SessionController.close records a closed session", async () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { type: string });
-    assert.equal(events.at(-1)?.type, "session_closed");
+    assert.equal(events.at(-2)?.type, "session_closed");
+    assert.equal(events.at(-1)?.type, "checkpoint");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -791,7 +755,8 @@ test("SessionController.resume reopens a closed session and close records it aga
       .split("\n")
       .map((line) => JSON.parse(line) as { type: string });
     assert.equal(events.filter((event) => event.type === "session_closed").length, 2);
-    assert.equal(events.at(-1)?.type, "session_closed");
+    assert.equal(events.at(-2)?.type, "session_closed");
+    assert.equal(events.at(-1)?.type, "checkpoint");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -994,7 +959,9 @@ test("SessionController handles a lead user turn and persists session state", as
       .split("\n")
       .map((line) => JSON.parse(line) as { type: string; runtimeEvent?: { type: string } });
     assert.deepEqual(
-      eventLines.map((event) => event.type),
+      eventLines
+        .map((event) => event.type)
+        .filter((type) => type !== "session_journal" && type !== "checkpoint"),
       [
         "session_created",
         "conversation_message_added",
@@ -1201,11 +1168,11 @@ test("SessionController redacts permission reasons in session files", async () =
   }
 });
 
-test("SessionController does not re-append events after a partial flush failure", async () => {
+test("SessionController does not re-append events after a derived snapshot write fails", async (t) => {
   const provider = fakeProvider(() => textResponse("assistant reply"));
   const workspace = await tempWorkspace();
   try {
-    const store = new FlakyFlushStore(workspace);
+    const store = new SessionStore(workspace);
     const leadAgent = new Agent({
       id: "lead",
       workspaceRoot: workspace,
@@ -1220,10 +1187,28 @@ test("SessionController does not re-append events after a partial flush failure"
       now: "2026-01-01T00:00:00.000Z",
     });
 
+    t.mock.method(
+      store,
+      "saveSnapshot",
+      async () => {
+        throw new Error("transient save failure");
+      },
+      { times: 1 },
+    );
     await assert.rejects(() => controller.handleUserMessage("hello"), /transient save failure/);
+    const id = "session_partial_flush";
+    const eventsFile = path.join(store.pathForSession(id), "events.jsonl");
+    const confirmed = await fs.readFile(eventsFile);
+    const recovered = await SessionController.resume({
+      sessionId: id,
+      workspaceRoot: workspace,
+      store,
+    });
+    assert.equal(recovered.getSnapshot().conversationMessages.at(-1)?.content, "assistant reply");
     await controller.flush();
 
-    assert.equal(store.appendedEventIds.length, 1);
+    assert.deepEqual(await fs.readFile(eventsFile), confirmed);
+    assert.deepEqual(await store.loadSnapshot(id), controller.getSnapshot());
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

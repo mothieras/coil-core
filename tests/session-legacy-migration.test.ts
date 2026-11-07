@@ -8,7 +8,7 @@ import { importLegacyAnthropicMessages } from "../src/core/session/store/legacyM
 import { SessionController } from "../src/core/session/controller.js";
 import { createSessionRecord } from "../src/core/session/types.js";
 import { createEmptySessionSnapshot } from "../src/core/session/projection/projection.js";
-import { fakeProvider, textMessage } from "./helpers/pi.js";
+import { fakeProvider, textMessage, toolCall, toolCallMessage } from "./helpers/pi.js";
 
 const LEGACY_MESSAGES = [
   { role: "user", content: "hello" },
@@ -110,12 +110,11 @@ test("SessionController.resume continues a session persisted in the legacy forma
     const session = createSessionRecord({ workspaceRoot: workspace, id: "s_legacy_resume" });
     await store.create(session);
     await store.saveSnapshot(session.id, createEmptySessionSnapshot());
-    await fs.mkdir(sessionPath(workspace, session.id), { recursive: true });
-    await fs.writeFile(
-      path.join(sessionPath(workspace, session.id), "lead-messages.json"),
-      `${JSON.stringify(LEGACY_MESSAGES, null, 2)}\n`,
-      "utf8",
-    );
+    const directory = store.pathForSession(session.id);
+    const legacyMessages = `${JSON.stringify(LEGACY_MESSAGES, null, 2)}\n`;
+    const oldJournal = '{"type":"old_record"}\n{"type":"unfinished';
+    await fs.writeFile(path.join(directory, "lead-messages.json"), legacyMessages);
+    await fs.writeFile(path.join(directory, "events.jsonl"), oldJournal);
 
     const controller = await SessionController.resume({
       sessionId: session.id,
@@ -128,9 +127,72 @@ test("SessionController.resume continues a session persisted in the legacy forma
       controller.leadAgentState.messages.map((message) => message.role),
       ["user", "assistant", "toolResult", "toolResult", "assistant"],
     );
+    assert.equal(controller.getSnapshot().recovery?.legacy, true);
+    assert.equal(
+      await fs.readFile(path.join(directory, "lead-messages.json"), "utf8"),
+      legacyMessages,
+    );
+    assert.equal(await fs.readFile(path.join(directory, "events.jsonl"), "utf8"), oldJournal);
 
     await controller.handleUserMessage("continue");
     assert.equal(controller.getSnapshot().conversationMessages.at(-1)?.content, "resumed reply");
+    const archive = (await fs.readdir(directory)).find((file) => file.startsWith("legacy-"));
+    assert.ok(archive);
+    assert.equal(
+      await fs.readFile(path.join(directory, archive, "lead-messages.json"), "utf8"),
+      legacyMessages,
+    );
+    assert.equal(
+      await fs.readFile(path.join(directory, archive, "events.jsonl"), "utf8"),
+      oldJournal,
+    );
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("unversioned pi-ai context keeps its conversation without trusting stale execution state", async () => {
+  const workspace = await tempWorkspace();
+  try {
+    const store = new SessionStore(workspace);
+    const session = createSessionRecord({
+      workspaceRoot: workspace,
+      title: "Earlier pi-ai session",
+    });
+    const old = [textMessage("Prior answer")];
+    await store.create(session);
+    await store.saveLeadMessages(session.id, old);
+    await store.saveSnapshot(session.id, {
+      ...createEmptySessionSnapshot(),
+      session,
+      backgroundCommands: [
+        {
+          id: "legacy",
+          sessionId: session.id,
+          commandSummary: "Unknown old operation",
+          status: "running",
+        },
+      ],
+    });
+    const controller = await SessionController.resume({
+      sessionId: session.id,
+      workspaceRoot: workspace,
+      store,
+      provider: fakeProvider((request) =>
+        request.messages.at(-1)?.role === "user"
+          ? toolCallMessage([toolCall("write_file", { path: "denied", content: "unsafe" })])
+          : textMessage("Tool was denied"),
+      ),
+      checkPermission: async () => ({ allowed: false, requested: true, reason: "User denied" }),
+    });
+    assert.equal(controller.getSnapshot().recovery?.legacy, true);
+    assert.deepEqual(controller.getSnapshot().backgroundCommands, []);
+    assert.deepEqual(controller.leadAgentState.messages, old);
+    assert.equal(controller.hasPendingAsyncWork(), false);
+    assert.equal((await store.loadSnapshot(session.id)).backgroundCommands[0]?.status, "running");
+    await controller.handleUserMessage("Try a fresh tool call");
+    assert.equal(controller.getSnapshot().toolCalls[0]?.status, "permission_denied");
+    await assert.rejects(fs.access(path.join(workspace, "denied")), { code: "ENOENT" });
   } finally {
     await fs.rm(workspace, { recursive: true, force: true });
   }

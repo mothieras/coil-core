@@ -20,6 +20,7 @@ import {
   type AgentRunFinishedEvent,
   type AgentRunStartedEvent,
   type AgentRunStoppingEvent,
+  type RuntimeCheckpointSink,
   type RuntimeLifecycleSink,
 } from "./lifecycle.js";
 import { summarizeLifecycleText } from "./lifecycleSummary.js";
@@ -112,7 +113,10 @@ export class AgentRuntime {
     );
   }
   private closing = false;
-  constructor(private readonly lifecycle: RuntimeLifecycleSink = noopRuntimeLifecycleSink) {}
+  constructor(
+    private readonly lifecycle: RuntimeLifecycleSink = noopRuntimeLifecycleSink,
+    private readonly confirmCheckpoint?: RuntimeCheckpointSink,
+  ) {}
 
   async close(deadlineAt = Date.now() + CLEANUP_TIMEOUT_MS): Promise<CancelRunResult[]> {
     this.closing = true;
@@ -218,6 +222,7 @@ export class AgentRuntime {
       try {
         result = await agentLoop(agent, {
           lifecycle: this.lifecycle,
+          confirmCheckpoint: this.confirmCheckpoint,
           runContext,
           signal: scope.signal,
           scope,

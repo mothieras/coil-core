@@ -10,7 +10,7 @@ An embeddable, local-first coding agent engine — a small trusted core, real MC
 Most coding agents are black boxes wired to a single cloud model. `coil-core` is the opposite: a small engine you can run locally, observe turn-by-turn, extend with your own tools or MCP servers, and embed inside your own CLI, TUI, or backend.
 
 - **Small trusted core.** One loop, one agent identity, one tool runtime. No UI in the engine, no special-case dispatch.
-- **Observable.** Every run is event-sourced: a single funnel writes `events.jsonl` + a pure snapshot + view events. Replay any session.
+- **Observable.** Managed sessions record events through one funnel and project them into a snapshot and view events. Journal checkpoints let a session recover its conversation and tool execution evidence.
 - **Real MCP.** Stdio MCP clients register as `mcp__server__tool` through the normal registry — no special dispatch path.
 - **Concurrent subagents.** Fork agents with narrowed tool scopes; completions auto-wake the lead.
 - **Provider-agnostic.** The loop talks to a `Provider` interface backed by pi-ai, so the default Anthropic path can be swapped for any built-in provider or a custom endpoint without touching the loop.
@@ -86,7 +86,7 @@ console.log(cancellation.status, cancellation.cleanup);
 - 自定义 `Provider.generate`、工具 handler 和权限回调接收可选 `signal`。工具返回结构化结果；取消等控制结果使用公开的 `ExecutionStoppedError`，不能转换成普通成功文本。忽略信号的操作保留实际完成跟踪；它真正结束前，同一 Agent 不能进入新运行。
 - 单个 MCP 请求取消不会关闭共享 server。远端操作不能证明已停止时保守报告未确认；其迟到结果不再改写活动消息。session 关闭才释放共享 MCP client。
 - 前台和后台 shell 使用引擎创建的独立进程组，先 TERM，最多等 2 秒，再 KILL，最多等 1 秒，受总预算限制。当前已在 **macOS arm64 / Node 24** 验证进程及受管后代退出；Linux 是现有 CI 的验证目标，本轮尚无 Linux 执行证据。Windows 不承诺进程树清理。
-- 不保证终止自行脱离进程组的后代或远端副作用，**取消不会回滚已经写入的文件、发出的请求或其他副作用**。本阶段也不承诺崩溃后的事务恢复或跨恢复的结果恰好交付一次。
+- 自行脱离进程组的后代或远端操作可能仍在执行。**取消不会回滚已经发生的副作用**。
 
 TUI 保持现有布局：运行或权限等待时按 **Ctrl+C** 取消运行；异步等待时按 **Esc** 只停止等待，按 **Ctrl+C** 取消所属工作；**Ctrl+D** 关闭整个 session。空闲时 Ctrl+C 仍为退出。界面分别显示正在停止、已停止、停止未确认和关闭失败，不依赖颜色区分。
 
@@ -132,6 +132,16 @@ console.log(result.status, result.output);
 pnpm build
 pnpm exec tsx examples/custom-tool.ts
 ```
+
+## 恢复会话
+
+在终端用 `/resume` 列出会话，再用 `/resume <序号或 ID>` 打开。会话从最后一个完整检查点恢复对话。若上次模型请求没有保存响应，界面会提示可能需要重新请求。
+
+如果工具可能已经执行，但保存的记录无法确认结果，恢复会暂停对话和自动唤醒。输入 `/recover` 查看待处理操作。核实后用 `/recover verify <id>` 记录核实，或用 `/recover discard <id>` 放弃追查该结果。处理完所有条目后可以继续对话。若确实需要重做，在新消息里明确请求，按当前权限流程执行。
+
+嵌入方使用 `SessionController.resume()`，从 `getSnapshot().recovery` 读取待处理操作和诊断，通过 `resolveRecovery(id, "verified" | "discarded")` 记录决定。检查点写入失败后，当前控制器会停止执行并返回写入错误。`flush()` 可重试保留的写入，随后可重新打开会话核对结果。
+
+新版会话用 `events.jsonl` 的检查点和对应的私有消息槽位恢复状态。`snapshot.json`、`lead-messages.json` 等文件是派生视图。旧版 pi-ai 和 Anthropic 会话可恢复对话，首次写入新版检查点时会保留原始文件。恢复保证覆盖本地文件系统上的单进程会话及异常退出。直接使用 `agentLoop` 或宿主工具入口时，由嵌入方管理持久化。后台结果在恢复后的交付语义仍由后续阶段完善。
 
 ## Architecture
 

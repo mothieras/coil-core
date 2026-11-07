@@ -8,8 +8,10 @@ test("record folds the event into the snapshot and queues it for flush", () => {
   const store = new SessionProjectionStore();
   store.record(taskChangedEvent("s1", { id: 1, subject: "A", status: "pending" } as never));
   assert.equal(store.getSnapshot().tasks.length, 1);
-  assert.equal(store.drainPending().length, 1);
-  assert.equal(store.drainPending().length, 0); // drained
+  assert.equal(store.getPending().length, 1);
+  assert.equal(store.getPending().length, 1);
+  store.acknowledge(1);
+  assert.equal(store.getPending().length, 0);
 });
 
 test("subscribers receive view events; a throwing subscriber is isolated", () => {

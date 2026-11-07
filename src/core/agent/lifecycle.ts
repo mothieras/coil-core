@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { Message } from "@earendil-works/pi-ai";
 import type {
   AgentKind,
   AgentRun,
@@ -41,6 +42,19 @@ export type RuntimeRunContext = {
   parentRunId?: string | undefined;
   parentToolCallId?: string | undefined;
 };
+
+export type RuntimeCheckpoint = { run: RuntimeRunContext } & (
+  | { type: "model_request" }
+  | { type: "tool_intent"; id: string; toolCallId: string; toolName: string }
+  | { type: "tool_result"; id: string; status: ToolResultStatus; uncertain: boolean }
+);
+
+/** Required execution confirmation. Unlike a lifecycle observer, failure stops the run. */
+export type RuntimeCheckpointSink = (
+  checkpoint: RuntimeCheckpoint,
+  messages: readonly Message[],
+  signal?: AbortSignal,
+) => Promise<void>;
 
 export type AgentRunStartedEvent = RuntimeLifecycleEventBase<"agent_run_started"> & {
   trigger: AgentRunTrigger;

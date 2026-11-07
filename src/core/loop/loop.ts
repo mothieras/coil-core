@@ -40,6 +40,7 @@ import {
   type AssistantMessageAddedEvent,
   type PermissionRequestedEvent,
   type PermissionResolvedEvent,
+  type RuntimeCheckpointSink,
   type RuntimeLifecycleSink,
   type RuntimeRunContext,
   type ToolFinishedEvent,
@@ -66,6 +67,7 @@ export type { AgentLoopResult, AgentLoopStopReason };
 
 export type AgentLoopOptions = {
   lifecycle?: RuntimeLifecycleSink | undefined;
+  confirmCheckpoint?: RuntimeCheckpointSink | undefined;
   runContext?: RuntimeRunContext | undefined;
   signal?: AbortSignal | undefined;
   /** Internal execution ownership, shared with AgentRuntime. */
@@ -223,8 +225,11 @@ async function executeToolUseBlock(options: ToolUseExecutionOptions): Promise<vo
   const toolRuntime = agent.toolRuntime;
   const source = getToolSource(agent, block.name);
   const startedAt = Date.now();
+  const { confirmCheckpoint, runContext, signal } = loopOptions;
+  let intentId: string | undefined;
+  let intentFailure: { cause: unknown } | undefined;
   let dispatched = false;
-  const finish = (result: ToolExecutionResult) => {
+  const finish = async (result: ToolExecutionResult, uncertain = false) => {
     results.push(toolResult(block, result, dispatched));
     emitToolFinished(loopOptions, block, source, {
       status: result.status,
@@ -234,19 +239,38 @@ async function executeToolUseBlock(options: ToolUseExecutionOptions): Promise<vo
       resultSummary: summarizeToolResult(result.output),
       ...(result.status !== "completed" ? { error: summarizeLifecycleText(result.output) } : {}),
     });
+    if (confirmCheckpoint && runContext && intentId) {
+      await waitForOperation(
+        confirmCheckpoint(
+          {
+            type: "tool_result",
+            run: runContext,
+            id: intentId,
+            status: result.status,
+            uncertain: dispatched && (uncertain || result.status === "unconfirmed"),
+          },
+          [...agent.messages, ...results],
+          signal,
+        ),
+        loopOptions,
+        `tool result:${block.id}`,
+      );
+    }
   };
 
   emitToolStarted(loopOptions, block, source);
+  let result: ToolExecutionResult;
   try {
     throwIfAborted(loopOptions.signal);
     if (agent.allowedTools !== undefined && !agent.allowedTools.includes(block.name)) {
-      finish({ status: "blocked", output: `Tool '${block.name}' is not allowed for this agent.` });
-      return;
+      return finish({
+        status: "blocked",
+        output: `Tool '${block.name}' is not allowed for this agent.`,
+      });
     }
     const blocked = hooks?.triggerControl("PreToolUse", block);
     if (blocked) {
-      finish({ status: "blocked", output: blocked });
-      return;
+      return finish({ status: "blocked", output: blocked });
     }
     const beforeInvoke = async (
       validated: Record<string, unknown>,
@@ -320,8 +344,29 @@ async function executeToolUseBlock(options: ToolUseExecutionOptions): Promise<vo
           return { status: "permission_denied", output: deniedResult };
         }
       }
+      if (confirmCheckpoint && runContext) {
+        throwIfAborted(signal);
+        const id = crypto.randomUUID();
+        try {
+          await confirmCheckpoint(
+            {
+              type: "tool_intent",
+              run: runContext,
+              id,
+              toolCallId: block.id,
+              toolName: block.name,
+            },
+            [...agent.messages, ...results],
+            signal,
+          );
+          intentId = id;
+        } catch (error) {
+          if (!(error instanceof ExecutionStoppedError)) intentFailure = { cause: error };
+          throw error;
+        }
+      }
     };
-    const result = await waitForOperation(
+    result = await waitForOperation(
       toolRuntime.invokeTool(block.name, block.arguments, {
         toolCallId: block.id,
         toolName: block.name,
@@ -338,8 +383,11 @@ async function executeToolUseBlock(options: ToolUseExecutionOptions): Promise<vo
       `tool:${block.id}`,
     );
     if (dispatched) hooks?.emitEffect("PostToolUse", block, result.output);
-    finish(result);
   } catch (error) {
+    if (intentFailure) {
+      await finish({ status: "not_executed", output: "Tool intent could not be saved." });
+      throw intentFailure.cause;
+    }
     if (error instanceof ExecutionStoppedError) {
       const status = !dispatched
         ? error.reason === "timeout"
@@ -350,7 +398,7 @@ async function executeToolUseBlock(options: ToolUseExecutionOptions): Promise<vo
           : error.reason === "timeout"
             ? "timeout"
             : "cancelled";
-      finish({
+      await finish({
         status,
         stopReason: error.reason,
         output: !dispatched
@@ -369,9 +417,17 @@ async function executeToolUseBlock(options: ToolUseExecutionOptions): Promise<vo
             { toolName: block.name, toolCallId: block.id, runId: loopOptions.runContext?.runId },
             error,
           );
-    finish({ status: "error", output: fatal.message });
+    try {
+      await finish({ status: "error", output: fatal.message }, true);
+    } catch (confirmationError) {
+      throw new AggregateError(
+        [fatal, confirmationError],
+        "Tool execution and confirmation failed",
+      );
+    }
     throw fatal;
   }
+  await finish(result);
 }
 
 function requireSuccessOutcome(
@@ -488,6 +544,18 @@ async function agentLoopInner(agent: Agent, options: AgentLoopOptions): Promise<
       // Fires before every model call (every loop turn), not only on genuine
       // user input — semantically a "pre LLM call" hook, despite the legacy name history.
       hooks?.emitEffect("PreLLMCall", messages);
+
+      if (options.confirmCheckpoint && options.runContext) {
+        await waitForOperation(
+          options.confirmCheckpoint(
+            { type: "model_request", run: options.runContext },
+            messages,
+            options.signal,
+          ),
+          options,
+          "model request checkpoint",
+        );
+      }
 
       // ── LLM call — outcome capture for recovery decision ──
       let outcome: LLMOutcome;
