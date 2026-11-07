@@ -23,10 +23,14 @@ export function PermissionModal({
   onDecision: (allow: boolean) => void;
   width?: number | undefined;
 }): React.ReactElement {
+  const [allow, setAllow] = React.useState(true);
+  React.useEffect(() => setAllow(true), [request.id]);
   useInput((input, key) => {
     const normalized = input.toLowerCase();
     if (normalized === "y") onDecision(true);
     else if (normalized === "n" || key.escape) onDecision(false);
+    else if (key.upArrow || key.downArrow) setAllow((value) => !value);
+    else if (key.return) onDecision(allow);
   });
 
   const preview = request.input
@@ -42,6 +46,8 @@ export function PermissionModal({
       width={width}
       borderStyle={TUI_BORDER_STYLE}
       borderColor={TUI_COLORS.warning}
+      borderLeft={false}
+      borderRight={false}
       paddingX={1}
     >
       <Text color={TUI_COLORS.warning} bold>
@@ -68,12 +74,15 @@ export function PermissionModal({
               {request.inputSummary}
             </Text>
           )}
-      <Text>
-        <Text color={TUI_COLORS.success} bold>
-          y
-        </Text>{" "}
-        allow once · <Text color={TUI_COLORS.danger}>n</Text> deny · Esc deny
-      </Text>
+      <Box flexDirection="column" marginTop={1}>
+        <Text color={allow ? TUI_COLORS.primary : TUI_COLORS.muted}>
+          {allow ? TUI_SYMBOLS.user : " "} Yes, allow once (y)
+        </Text>
+        <Text color={!allow ? TUI_COLORS.primary : TUI_COLORS.muted}>
+          {!allow ? TUI_SYMBOLS.user : " "} No, deny (n)
+        </Text>
+        <Text color={TUI_COLORS.muted}>↑↓ select · Enter confirm · Esc deny</Text>
+      </Box>
     </Box>
   );
 }

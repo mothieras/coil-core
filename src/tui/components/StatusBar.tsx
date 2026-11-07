@@ -27,7 +27,7 @@ export function formatStatusLine(
   const mcpFailed = snapshot.mcpServers.filter((server) => server.status === "failed").length;
 
   // Operational failures and active work come first. Low-priority identity and
-  // token totals are admitted only when the line still fits.
+  // context usage are admitted only when the line still fits.
   const important: string[] = [];
   if (mcpFailed > 0) important.push(`mcp !${mcpFailed}`);
   const running = formatRunningCounts(runningTools, runningSubagents, runningBackground);
@@ -41,15 +41,6 @@ export function formatStatusLine(
 
   const optional: string[] = [];
   if (mcpConnected > 0 && mcpFailed === 0) optional.push(`mcp ${mcpConnected}`);
-  if (!compact && session?.title && session.title !== "Untitled session") {
-    optional.push(truncateEnd(session.title, 22));
-  }
-  if (wide && session) optional.push(`#${session.id.slice(0, 8)}`);
-  if (wide && (snapshot.usage.inputTokens > 0 || snapshot.usage.outputTokens > 0)) {
-    optional.push(
-      `↑${formatCount(snapshot.usage.inputTokens)} ↓${formatCount(snapshot.usage.outputTokens)}`,
-    );
-  }
 
   return fitStatusParts([...important, ...optional], Math.max(18, width - 2));
 }

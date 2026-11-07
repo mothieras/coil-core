@@ -1,12 +1,13 @@
 /** Real Ink/TTY fixture. Run in a disposable directory passed in argv[2]. */
 import React from "react";
-import { render, useApp } from "ink";
+import { useApp } from "ink";
 import { SessionController } from "../../src/core/session/controller.js";
 import { SessionStore } from "../../src/core/session/store/sessionStore.js";
 import { createPermissionChecker } from "../../src/core/permission/permission.js";
 import { createPermissionBridge } from "../../src/tui/permissionBridge.js";
 import { useSession } from "../../src/tui/useSession.js";
 import { App } from "../../src/tui/components/App.js";
+import { renderTerminal } from "../../src/tui/terminal.js";
 import { fakeProvider, textMessage, toolCall, toolCallMessage } from "../helpers/pi.js";
 
 const workspaceRoot = process.argv[2]!;
@@ -19,6 +20,10 @@ const remote = Promise.withResolvers<string>();
 const provider = fakeProvider((request) => {
   const last = request.messages.at(-1);
   if (last?.role !== "user") return textMessage("done");
+  if (last.content === "scroll")
+    return textMessage(
+      Array.from({ length: 100 }, (_, i) => `Scroll fixture line ${i}`).join("\n"),
+    );
   if (last.content === "permission")
     return toolCallMessage([toolCall("bash", { command: "rm demo-file" })]);
   if (last.content === "running")
@@ -75,10 +80,7 @@ function Root() {
     }),
   });
 }
-const instance = render(React.createElement(Root), {
-  exitOnCtrlC: false,
-  kittyKeyboard: { mode: "disabled" },
-});
+const instance = renderTerminal(React.createElement(Root));
 process.once("SIGTERM", () => {
   remote.resolve("fixture shutdown");
   instance.unmount();

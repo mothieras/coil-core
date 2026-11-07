@@ -1,5 +1,5 @@
 import React from "react";
-import { render, useApp } from "ink";
+import { useApp } from "ink";
 import { getModel } from "../core/config/index.js";
 import { createPermissionChecker } from "../core/permission/permission.js";
 import type { CheckPermissionFn } from "../core/permission/types.js";
@@ -10,6 +10,7 @@ import type { ToolProviderLoadResult } from "../core/tools/types.js";
 import { App } from "./components/App.js";
 import { createPermissionBridge } from "./permissionBridge.js";
 import { useSession } from "./useSession.js";
+import { renderTerminal } from "./terminal.js";
 
 export async function runTui(): Promise<void> {
   const workspaceRoot = process.cwd();
@@ -57,10 +58,7 @@ export async function runTui(): Promise<void> {
       return <App session={session} />;
     }
 
-    const instance = render(<Root />, {
-      exitOnCtrlC: false,
-      kittyKeyboard: { mode: "disabled" },
-    });
+    const instance = renderTerminal(<Root />);
     await instance.waitUntilExit();
     // /exit and Ctrl+C both await useSession.shutdown() before Root requests exit.
   } finally {

@@ -1,6 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatToolPreview, formatToolTarget } from "../src/tui/toolPreview.js";
+import { formatToolPreview, formatToolSummary, formatToolTarget } from "../src/tui/toolPreview.js";
+
+test("tool summaries show readable targets while preserving unknown and truncated inputs", () => {
+  assert.equal(formatToolSummary("bash", '{"command":"pnpm test","timeout":30}'), "pnpm test");
+  assert.equal(
+    formatToolSummary(
+      "edit_file",
+      '{"filepath":"src/a.ts","new_text":"[content omitted: 9 chars]"}',
+    ),
+    "src/a.ts",
+  );
+  for (const summary of ['{"command":"truncated…', '{"query":"needle"}', "null"]) {
+    assert.equal(formatToolSummary("unknown", summary), summary);
+  }
+});
 
 test("edit_file previews old/new lines as a diff", () => {
   const lines = formatToolPreview("edit_file", {

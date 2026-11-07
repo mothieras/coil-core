@@ -6,6 +6,7 @@ import type { TurnPhase } from "../sessionActions.js";
 import { humanizeIdentifier, truncateEnd } from "../format.js";
 import { selectRunningTools, selectRunningSubagents, selectRunningBackground } from "../state.js";
 import { shouldAnimateActivity, TUI_COLORS, TUI_SYMBOLS } from "../theme.js";
+import { formatToolSummary } from "../toolPreview.js";
 
 const PHASE_LABEL: Record<TurnPhase, string> = {
   thinking: "Working",
@@ -34,7 +35,7 @@ export function RunningActivity({
       id: `tool:${tool.runId}:${tool.id}`,
       marker: TUI_SYMBOLS.branch,
       label: humanizeIdentifier(tool.toolName),
-      summary: tool.inputSummary,
+      summary: tool.inputSummary ? formatToolSummary(tool.toolName, tool.inputSummary) : undefined,
     })),
     ...selectRunningSubagents(snapshot).map((agent) => ({
       id: `subagent:${agent.id}`,
@@ -56,7 +57,7 @@ export function RunningActivity({
   const shownRows = rows.slice(0, maxRows);
   const hiddenCount = rows.length - shownRows.length;
   return (
-    <Box flexDirection="column" width={width} paddingX={1} marginBottom={1}>
+    <Box flexDirection="column" width={width} paddingX={1} marginY={1}>
       <Text color={TUI_COLORS.primary} bold>
         {animated ? <Spinner type="dots" /> : TUI_SYMBOLS.running} {phaseLabel || "Working"}
       </Text>

@@ -2,6 +2,19 @@ const MAX_CHANGED_LINES = 8;
 const MAX_CONTENT_LINES = 10;
 const CONTEXT_LINES = 2;
 
+/** Extract a readable target from the already-redacted lifecycle summary. */
+export function formatToolSummary(toolName: string, summary: string): string {
+  try {
+    const input: unknown = JSON.parse(summary);
+    if (input !== null && typeof input === "object" && !Array.isArray(input)) {
+      return formatToolTarget(toolName, input as Record<string, unknown>) ?? summary;
+    }
+  } catch {
+    // Long lifecycle summaries can be truncated JSON; keep the supplied text.
+  }
+  return summary;
+}
+
 function sideLines(text: string, prefix: "- " | "+ ", cap: number): string[] {
   const lines = text.split("\n");
   const shown = lines.slice(0, cap).map((line) => `${prefix}${line}`);

@@ -51,38 +51,37 @@ export function Footer(props: FooterProps): React.ReactElement {
       )}
       {permission ? (
         <PermissionModal request={permission} onDecision={onPermissionDecision} width={width} />
-      ) : busy ? (
-        <Box paddingX={1}>
-          <Text color={TUI_COLORS.muted}>
-            {snapshot.agentRuns.some((run) => run.status === "stopping")
-              ? "Stopping execution; waiting for confirmation."
-              : "Working, input paused."}
-          </Text>
-        </Box>
       ) : (
         <Box
           flexDirection="column"
           width={width}
           borderStyle={TUI_BORDER_STYLE}
-          borderColor={TUI_COLORS.primary}
+          borderLeft={false}
+          borderRight={false}
+          borderColor={TUI_COLORS.border}
           paddingX={1}
         >
           <Input
             value={input}
             onChange={onInputChange}
             onSubmit={onSubmit}
-            busy={false}
-            disabled={false}
+            busy={busy}
+            disabled={phase === "closing" || phase === "close-failed"}
             history={history}
           />
         </Box>
       )}
       <StatusBar snapshot={snapshot} model={model} width={width} />
+      {snapshot.agentRuns.some((run) => run.status === "stopping") && (
+        <Box paddingX={1}>
+          <Text color={TUI_COLORS.warning}>Stopping execution; waiting for confirmation.</Text>
+        </Box>
+      )}
       {
         <Box paddingX={1}>
           <Text color={TUI_COLORS.muted}>
             {permission
-              ? "Ctrl+C cancel run · Ctrl+D close session"
+              ? "Scroll to review · Ctrl+C cancel · Ctrl+D close"
               : footerHint(phase, busy, width)}
           </Text>
         </Box>
@@ -108,13 +107,12 @@ function footerHint(phase: TurnPhase, busy: boolean, width: number): string {
   if (phase === "close-failed")
     return "Session closed to new work. Inspect cleanup errors before exiting.";
   if (!busy) {
-    return width < 72
-      ? "Enter send · / commands · Ctrl+C quit"
-      : "Enter send · ↑↓ history · / commands · Ctrl+C quit";
+    return width < 72 ? "/ commands · Ctrl+D quit" : "/ commands · ↑↓ prompts · Ctrl+D quit";
   }
   if (phase === "waiting-async") {
-    return "Esc stop waiting · Ctrl+C cancel work · Ctrl+D close";
+    return "Esc stop waiting · Ctrl+C cancel work · draft kept";
   }
-  if (phase === "auto-waking") return "Applying results · Ctrl+C cancel · Ctrl+D close";
-  return "Ctrl+C cancel run · Ctrl+D close session";
+  return width < 72
+    ? "Esc interrupt · draft kept"
+    : "Esc interrupt · Ctrl+C cancel · draft kept until you send";
 }

@@ -1,13 +1,16 @@
 export const TUI_COLORS = {
-  primary: "cyan",
-  info: "blue",
-  success: "green",
-  warning: "yellow",
-  danger: "red",
-  muted: "gray",
+  // Muted violet/blue accents inspired by pi's default terminal theme.
+  primary: "#B39DDB",
+  border: "#7AA2CF",
+  info: "#82AAFF",
+  success: "#8FBC8F",
+  warning: "#E5C07B",
+  danger: "#E06C75",
+  muted: "#9298A3",
 } as const;
 
 export type TuiSymbols = {
+  brand: string;
   user: string;
   assistant: string;
   system: string;
@@ -26,14 +29,15 @@ export type TuiSymbols = {
 };
 
 const UNICODE_SYMBOLS: TuiSymbols = {
-  user: "›",
-  assistant: "●",
+  brand: "⊙",
+  user: "❯",
+  assistant: "⊙",
   system: "!",
-  success: "✓",
+  success: "●",
   warning: "!",
   error: "×",
-  running: "●",
-  branch: "└",
+  running: "⊙",
+  branch: "⎿",
   subagent: "◇",
   background: "↳",
   task: "□",
@@ -44,8 +48,9 @@ const UNICODE_SYMBOLS: TuiSymbols = {
 };
 
 const ASCII_SYMBOLS: TuiSymbols = {
+  brand: "(o)",
   user: ">",
-  assistant: "*",
+  assistant: "(o)",
   system: "!",
   success: "+",
   warning: "!",

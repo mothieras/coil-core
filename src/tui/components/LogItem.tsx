@@ -1,8 +1,9 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { LogItem as LogItemModel } from "../state.js";
-import { formatDuration, humanizeIdentifier, truncateEnd } from "../format.js";
+import { displayWidth, formatDuration, humanizeIdentifier, truncateEnd } from "../format.js";
 import { renderMarkdown } from "../markdown.js";
+import { formatToolSummary } from "../toolPreview.js";
 import { TUI_COLORS, TUI_SYMBOLS } from "../theme.js";
 
 type EventVisual = { marker: string; color: string; label: string; summary?: string | undefined };
@@ -23,22 +24,24 @@ export function LogLine({
     ? truncateEnd(visual.summary, Math.max(16, Math.min(72, width - visual.label.length - 12)))
     : undefined;
   return (
-    <Box flexDirection="column" width={width} paddingLeft={1}>
+    <Box flexDirection="column" width={width} paddingX={1} marginTop={1}>
       <Text wrap="truncate-end">
-        <Text color={visual.color}>{visual.marker}</Text>{" "}
-        <Text bold={item.kind === "info" || isExceptional(item.status)}>{visual.label}</Text>
+        <Text color={visual.color}>{visual.marker}</Text> <Text bold>{visual.label}</Text>
         {summary ? <Text color={TUI_COLORS.muted}> {summary}</Text> : null}
         {status ? <Text color={visual.color}> · {status}</Text> : null}
-        {item.source ? <Text color={TUI_COLORS.muted}> [{item.source}]</Text> : null}
+        {item.source && item.source !== "builtin" ? (
+          <Text color={TUI_COLORS.muted}> [{item.source}]</Text>
+        ) : null}
         {item.durationMs !== undefined ? (
           <Text color={TUI_COLORS.muted}> · {formatDuration(item.durationMs)}</Text>
         ) : null}
       </Text>
       {detail ? (
-        <Text color={isExceptional(item.status) ? visual.color : TUI_COLORS.muted}>
-          {"  "}
-          {detail}
-        </Text>
+        <Box paddingLeft={2}>
+          <Text color={isExceptional(item.status) ? visual.color : TUI_COLORS.muted}>
+            {TUI_SYMBOLS.branch} {detail}
+          </Text>
+        </Box>
       ) : null}
     </Box>
   );
@@ -55,14 +58,16 @@ function MessageLine({ item, width }: { item: LogItemModel; width: number }): Re
   const color = role === "system" ? TUI_COLORS.warning : TUI_COLORS.primary;
   const body = role === "assistant" ? renderMarkdown(item.title) : item.title;
   return (
-    <Box width={width} paddingLeft={1} marginTop={role === "user" ? 1 : 0}>
-      <Text>
+    <Box width={width} paddingX={1} marginTop={1}>
+      <Box width={role === "system" ? 9 : displayWidth(marker) + 1} flexShrink={0}>
         <Text color={color} bold>
           {marker}
           {role === "system" ? " System" : ""}{" "}
         </Text>
-        {body}
-      </Text>
+      </Box>
+      <Box flexGrow={1} flexShrink={1}>
+        <Text>{body}</Text>
+      </Box>
     </Box>
   );
 }
@@ -74,7 +79,7 @@ function eventVisual(item: LogItemModel): EventVisual {
       marker: exceptional ? markerForStatus(item.status) : TUI_SYMBOLS.success,
       color: colorForStatus(item.status),
       label: humanizeIdentifier(item.title),
-      summary: item.summary,
+      summary: item.summary ? formatToolSummary(item.title, item.summary) : undefined,
     };
   }
   if (item.kind === "subagent") {

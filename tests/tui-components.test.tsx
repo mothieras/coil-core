@@ -9,14 +9,20 @@ import { LogLine } from "../src/tui/components/LogItem.js";
 import { StatusBar, formatStatusLine } from "../src/tui/components/StatusBar.js";
 import { RunningActivity } from "../src/tui/components/RunningActivity.js";
 import { PermissionModal } from "../src/tui/components/PermissionModal.js";
+import { Footer } from "../src/tui/components/Footer.js";
 import {
   classifyInput,
   commandSuggestions,
-  splitPastedInput,
+  normalizePastedInput,
   Input,
 } from "../src/tui/components/Input.js";
 import { displayWidth } from "../src/tui/format.js";
-import { borderStyleFor, shouldAnimateActivity, symbolsFor } from "../src/tui/theme.js";
+import {
+  borderStyleFor,
+  shouldAnimateActivity,
+  symbolsFor,
+  TUI_SYMBOLS,
+} from "../src/tui/theme.js";
 import type { SessionSnapshot } from "../src/core/session/types.js";
 
 const waitForInput = (ms = 50): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -84,16 +90,18 @@ function sessionApi(overrides: Partial<UseSessionApi> = {}): UseSessionApi {
 function InputHarness({
   history = [],
   submitted,
+  busy = false,
 }: {
   history?: string[];
   submitted?: string[];
+  busy?: boolean;
 }): React.ReactElement {
   const [value, setValue] = React.useState("");
   return (
     <Input
       value={value}
       onChange={setValue}
-      busy={false}
+      busy={busy}
       disabled={false}
       history={history}
       onSubmit={(next) => {
@@ -132,12 +140,15 @@ test("LogLine keeps conversation primary and tool traces scannable", () => {
     />,
   );
 
-  assert.match(user, /› hello there/);
+  assert.ok(user.includes(`${TUI_SYMBOLS.user} hello there`));
   assert.doesNotMatch(user, /YOU/);
-  assert.match(assistant, /●.*done/);
+  assert.ok(assistant.includes(TUI_SYMBOLS.assistant));
+  assert.match(assistant, /done/);
   assert.doesNotMatch(assistant, /AGENT|\*\*/);
   assert.match(assistant, /fix\(\)|step/);
-  assert.match(tool, /✓ Read file.*src\/main\.ts.*42ms.*120 chars/s);
+  assert.ok(tool.includes(`${TUI_SYMBOLS.success} Read file`));
+  assert.match(tool, /Read file src\/main\.ts.*42ms.*output \(120 chars/s);
+  assert.doesNotMatch(tool, /\{"path"/);
 });
 
 test("tool contract failures never render as success at 80 columns", () => {
@@ -145,8 +156,8 @@ test("tool contract failures never render as success at 80 columns", () => {
     const frame = frameOf(
       <LogLine width={80} item={{ id: status, kind: "tool", title: "read_file", status }} />,
     );
-    assert.match(frame, /× Read file/);
-    assert.doesNotMatch(frame, /✓/);
+    assert.ok(frame.includes(`${TUI_SYMBOLS.error} Read file`));
+    assert.ok(!frame.includes(`${TUI_SYMBOLS.success} Read file`));
     assert.ok(frame.toLowerCase().includes(status.replaceAll("_", " ")));
     assert.ok(frame.split("\n").every((line) => displayWidth(line) <= 80));
   }
@@ -154,8 +165,8 @@ test("tool contract failures never render as success at 80 columns", () => {
 
 test("StatusBar prioritizes active work and fits terminal cell width", () => {
   const full = frameOf(<StatusBar snapshot={snap()} model="deepseek" />);
-  for (const token of ["sess9", "deepseek", "↑14 ↓6", "ctx≈9/50k", "run t1", "mcp 1"])
-    assert.ok(full.includes(token));
+  for (const token of ["deepseek", "ctx≈9/50k", "run t1", "mcp 1"]) assert.ok(full.includes(token));
+  assert.doesNotMatch(full, /sess9|↑14 ↓6/);
 
   const narrow = formatStatusLine(snap(), "provider/very-long-model-name", 60);
   assert.match(narrow, /^run t1 · r · .*ctx≈9\/50k/);
@@ -186,6 +197,9 @@ test("RunningActivity names foreground work", () => {
 });
 
 test("theme falls back to ASCII and reduced motion", () => {
+  assert.equal(symbolsFor({}).brand, "⊙");
+  assert.equal(symbolsFor({}).assistant, "⊙");
+  assert.equal(symbolsFor({ TERM: "dumb" }).brand, "(o)");
   const symbols = symbolsFor({ TERM: "dumb" });
   assert.deepEqual([symbols.user, symbols.success, symbols.error], [">", "+", "x"]);
   assert.equal(borderStyleFor({ TERM: "dumb" }), "classic");
@@ -205,22 +219,26 @@ test("input helpers classify commands, suggestions, and pasted newlines", () => 
   );
   assert.deepEqual(commandSuggestions("plain text"), []);
   assert.deepEqual(commandSuggestions("/resume 2"), []);
-  assert.deepEqual(splitPastedInput("/help\r"), { submit: "/help", value: "" });
-  assert.deepEqual(splitPastedInput("fix the bug\r\nthen run tests\n"), {
-    submit: "fix the bug",
-    value: "then run tests",
-  });
+  assert.equal(normalizePastedInput("/help\r"), "/help\n");
+  assert.equal(
+    normalizePastedInput("fix the bug\r\nthen run tests\n"),
+    "fix the bug\nthen run tests\n",
+  );
 });
 
-test("Input submits pasted chunks without leaking carriage returns", async () => {
+test("Input preserves a multiline paste until explicit submission", async () => {
   const submitted: string[] = [];
   const app = render(<InputHarness submitted={submitted} />);
-  app.stdin.write("/help\r");
+  app.stdin.write("fix the bug\r\nthen run tests");
   await waitForInput();
   const frame = app.lastFrame() ?? "";
+  assert.deepEqual(submitted, []);
+  assert.match(frame, /fix the bug\s+then run tests/);
+  app.stdin.write("\r");
+  await waitForInput();
   app.unmount();
 
-  assert.deepEqual(submitted, ["/help"]);
+  assert.deepEqual(submitted, ["fix the bug\nthen run tests"]);
   assert.doesNotMatch(frame, /\r/);
 });
 
@@ -297,7 +315,8 @@ test("App invokes only supported interrupt and quit paths", async () => {
 
   await send(base, "\x1b");
   await send({ ...base, busy: true, phase: "thinking" }, "\x1b");
-  assert.equal(interrupts, 0, "ESC cannot cancel foreground turns");
+  assert.equal(interrupts, 0, "foreground cancellation does not just stop async waiting");
+  assert.equal(cancels, 1, "ESC cancels foreground turns");
 
   await send({ ...base, busy: true, phase: "waiting-async" }, "\x1b");
   assert.equal(interrupts, 1, "ESC stops cooperative async waiting");
@@ -305,7 +324,7 @@ test("App invokes only supported interrupt and quit paths", async () => {
   await send(base, "\x03");
   await send({ ...base, busy: true, phase: "thinking" }, "\x03");
   assert.equal(quits, 1, "Ctrl+C quits only while idle");
-  assert.equal(cancels, 1, "Ctrl+C cancels a foreground turn");
+  assert.equal(cancels, 2, "Ctrl+C also cancels a foreground turn");
   await send({ ...base, busy: true, phase: "thinking" }, "\x04");
   assert.equal(quits, 2, "Ctrl+D closes even while running");
 });
@@ -328,6 +347,299 @@ test("App renders the transcript and composer together", () => {
   );
 
   assert.match(frame, /hello world/);
-  assert.match(frame, /#sess9/);
-  assert.match(frame, /› Ask coil to change the code/);
+  assert.ok(frame.includes(`${TUI_SYMBOLS.brand} coil · deepseek`));
+  assert.match(frame, /deepseek/);
+  assert.ok(frame.includes(`${TUI_SYMBOLS.user} Ask anything, or describe a change`));
+  assert.doesNotMatch(frame, /╭|╰|│|#sess9/);
+});
+
+test("composer, multiline messages and permission previews fit narrow terminals", () => {
+  const text = "请检查这个函数的行为，然后说明修改的原因。";
+  for (const width of [40, 80, 120]) {
+    const message = frameOf(
+      <LogLine
+        width={width}
+        item={{ id: "cn", kind: "message", role: "user", title: `${text}\n第二行` }}
+      />,
+    );
+    assert.ok(message.includes("第二行"));
+    const footer = frameOf(
+      <Footer
+        snapshot={snap()}
+        width={width}
+        phase="thinking"
+        busy
+        input={text}
+        onInputChange={() => {}}
+        onSubmit={() => {}}
+        permission={null}
+        onPermissionDecision={() => {}}
+      />,
+    );
+    const permission = frameOf(
+      <PermissionModal
+        width={width}
+        request={{
+          id: "p1",
+          toolName: "edit_file",
+          reason: "writes a tracked file",
+          input: {
+            filepath: "src/中文文件.ts",
+            old_text: "const a = 1;",
+            new_text: "const a = 2;",
+          },
+        }}
+        onDecision={() => {}}
+      />,
+    );
+    for (const frame of [message, footer, permission]) {
+      assert.ok(
+        frame.split("\n").every((line) => displayWidth(line) <= width),
+        frame,
+      );
+    }
+    assert.ok(footer.includes("Working"));
+    assert.ok(!footer.includes("input paused"));
+  }
+});
+
+test("Input selects slash commands and completes their arguments with Tab", async () => {
+  const submitted: string[] = [];
+  const app = render(<InputHarness submitted={submitted} />);
+  for (const key of ["/re", "\x1b[B", "\t", "verify operation-1", "\r"]) {
+    app.stdin.write(key);
+    await waitForInput();
+  }
+  assert.deepEqual(submitted, ["/recover verify operation-1"]);
+  app.unmount();
+});
+
+test("Input runs the selected command with Enter and dismisses suggestions with Escape", async () => {
+  const submitted: string[] = [];
+  const app = render(<InputHarness submitted={submitted} />);
+  for (const key of ["/re", "\x1b[B", "\r"]) {
+    app.stdin.write(key);
+    await waitForInput();
+  }
+  assert.deepEqual(submitted, ["/recover"]);
+  app.stdin.write("/");
+  await waitForInput();
+  app.stdin.write("\x1b");
+  await waitForInput();
+  assert.doesNotMatch(app.lastFrame() ?? "", /show commands|Tab complete/);
+  app.unmount();
+});
+
+test("Input restores a draft after navigating history", async () => {
+  const app = render(<InputHarness history={["older prompt", "/status"]} />);
+  for (const key of ["unfinished draft", "\x1b[A", "\x1b[A"]) {
+    app.stdin.write(key);
+    await waitForInput();
+  }
+  assert.match(app.lastFrame() ?? "", /older prompt/);
+  for (const key of ["\x1b[B", "\x1b[B"]) {
+    app.stdin.write(key);
+    await waitForInput();
+  }
+  assert.match(app.lastFrame() ?? "", /unfinished draft/);
+  app.unmount();
+});
+
+test("Input keeps a busy draft and sends it only after idle and another Enter", async () => {
+  const submitted: string[] = [];
+  const app = render(<InputHarness busy submitted={submitted} />);
+  app.stdin.write("next change");
+  await waitForInput();
+  app.stdin.write("\r");
+  await waitForInput();
+  assert.deepEqual(submitted, []);
+  assert.match(app.lastFrame() ?? "", /next change/);
+  app.rerender(<InputHarness submitted={submitted} />);
+  await waitForInput();
+  assert.deepEqual(submitted, []);
+  app.stdin.write("\r");
+  await waitForInput();
+  assert.deepEqual(submitted, ["next change"]);
+  app.unmount();
+});
+
+test("App clears an idle draft before Ctrl+C can quit", async () => {
+  let quits = 0;
+  const edits: string[] = [];
+  const app = render(
+    <App
+      session={sessionApi({
+        input: "draft",
+        setInput: (value) => edits.push(value),
+        quit: () => {
+          quits += 1;
+        },
+      })}
+    />,
+  );
+  app.stdin.write("\x03");
+  await waitForInput();
+  assert.deepEqual(edits, [""]);
+  assert.equal(quits, 0);
+  app.unmount();
+});
+
+test("permission keyboard selection denies without interrupting the run", async () => {
+  const decisions: boolean[] = [];
+  let cancels = 0;
+  const request = { id: "p1", toolName: "bash", reason: "shell access" };
+  const session = sessionApi({
+    busy: true,
+    phase: "thinking",
+    permission: request,
+    decide: (allow) => decisions.push(allow),
+    cancel: () => {
+      cancels += 1;
+    },
+  });
+  const app = render(<App session={session} />);
+  for (const key of ["\x1b[B", "\r", "\x1b"]) {
+    app.stdin.write(key);
+    await waitForInput();
+  }
+  assert.deepEqual(decisions, [false, false]);
+  assert.equal(cancels, 0);
+  app.rerender(<App session={{ ...session, permission: { ...request, id: "p2" } }} />);
+  await waitForInput();
+  app.stdin.write("\r");
+  await waitForInput();
+  assert.deepEqual(decisions, [false, false, true]);
+  app.unmount();
+});
+
+function resizeApp(app: ReturnType<typeof render>, columns: number, rows: number): void {
+  Object.defineProperty(app.stdout, "columns", { configurable: true, value: columns });
+  Object.defineProperty(app.stdout, "rows", { configurable: true, value: rows });
+  app.stdout.emit("resize");
+}
+
+test("full-screen transcript scrolls by line, holds history on new output and follows at the bottom", async () => {
+  const snapshot = snap();
+  snapshot.toolCalls = [];
+  snapshot.mcpServers = [];
+  snapshot.conversationMessages = [
+    {
+      id: "long",
+      sessionId: "sess9",
+      role: "assistant",
+      source: "agent_result",
+      content: Array.from(
+        { length: 100 },
+        (_, i) => `history-line-${String(i).padStart(3, "0")}`,
+      ).join("\n"),
+      createdAt: "t",
+    },
+  ];
+  const session = () => sessionApi({ state: createTuiState(snapshot, { model: "test-model" }) });
+  const app = render(<App session={session()} />);
+  resizeApp(app, 80, 24);
+  await waitForInput();
+  let frame = app.lastFrame() ?? "";
+  assert.equal(frame.split("\n").length, 24, frame);
+  assert.match(frame, /history-line-099/);
+  assert.doesNotMatch(frame, /history-line-000/);
+  assert.match(frame.split("\n")[0]!, /coil/);
+  assert.match(frame.split("\n").at(-1)!, /Ctrl\+D quit/);
+
+  app.stdin.write("\x1b[5~");
+  await waitForInput();
+  frame = app.lastFrame() ?? "";
+  assert.match(frame, /Reading history/);
+  assert.doesNotMatch(frame, /history-line-099/);
+  const firstVisible = frame.match(/history-line-\d+/)?.[0];
+  assert.ok(firstVisible);
+  snapshot.conversationMessages.push({
+    ...snapshot.conversationMessages[0]!,
+    id: "new",
+    content: "new result",
+  });
+  app.rerender(<App session={session()} />);
+  await waitForInput();
+  assert.equal((app.lastFrame() ?? "").match(/history-line-\d+/)?.[0], firstVisible);
+
+  for (let i = 0; i < 3; i++) {
+    app.stdin.write("\x1b[6~");
+    await waitForInput();
+  }
+  assert.match(app.lastFrame() ?? "", /new result/);
+  assert.doesNotMatch(app.lastFrame() ?? "", /Reading history/);
+  for (const [columns, rows] of [
+    [40, 12],
+    [120, 30],
+  ]) {
+    resizeApp(app, columns!, rows!);
+    await waitForInput();
+    frame = app.lastFrame() ?? "";
+    assert.equal(frame.split("\n").length, rows, frame);
+    assert.ok(
+      frame.split("\n").every((line) => displayWidth(line) <= columns!),
+      frame,
+    );
+    assert.match(frame, /new result/);
+    assert.match(frame.split("\n").at(-1)!, /Ctrl\+D quit/);
+  }
+  app.unmount();
+});
+
+test("short screens keep permission choices reachable and let users page through the preview", async () => {
+  const request = {
+    id: "p1",
+    toolName: "edit_file",
+    reason: "Review this change before allowing it.",
+    input: {
+      filepath: "src/demo.ts",
+      old_text: Array.from({ length: 8 }, (_, i) => `old ${i}`).join("\n"),
+      new_text: Array.from({ length: 8 }, (_, i) => `new ${i}`).join("\n"),
+    },
+  };
+  const app = render(
+    <App session={sessionApi({ busy: true, phase: "thinking", permission: request })} />,
+  );
+  resizeApp(app, 60, 16);
+  await waitForInput();
+  assert.equal((app.lastFrame() ?? "").split("\n").length, 16);
+  assert.match(app.lastFrame() ?? "", /Yes, allow once/);
+  assert.match(app.lastFrame() ?? "", /No, deny/);
+  for (let i = 0; i < 5; i++) {
+    app.stdin.write("\x1b[5~");
+    await waitForInput();
+  }
+  assert.match(app.lastFrame() ?? "", /Permission required/);
+  assert.match(app.lastFrame() ?? "", /Review this change/);
+  app.unmount();
+});
+
+test("long drafts remain pageable without changing their text or submitting", async () => {
+  let edits = 0;
+  let submits = 0;
+  const input = Array.from({ length: 50 }, (_, i) => `draft-line-${i}`).join("\n");
+  const app = render(
+    <App
+      session={sessionApi({
+        input,
+        setInput: () => {
+          edits += 1;
+        },
+        submit: () => {
+          submits += 1;
+        },
+      })}
+    />,
+  );
+  resizeApp(app, 80, 24);
+  await waitForInput();
+  assert.match(app.lastFrame() ?? "", /draft-line-49/);
+  assert.match(app.lastFrame() ?? "", /Scroll to review your draft/);
+  assert.equal((app.lastFrame() ?? "").split("\n").length, 24);
+  app.stdin.write("\x1b\x1b[5~");
+  await waitForInput();
+  assert.doesNotMatch(app.lastFrame() ?? "", /draft-line-49/);
+  assert.equal(edits, 0);
+  assert.equal(submits, 0);
+  app.unmount();
 });
