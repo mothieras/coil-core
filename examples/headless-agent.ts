@@ -6,14 +6,14 @@
  * Requires ANTHROPIC_API_KEY + MODEL_ID in the environment (see .env.example).
  *
  *   pnpm build
- *   tsx examples/headless-agent.ts "explain this repo's entry point"
+ *   pnpm exec tsx examples/headless-agent.ts "explain this repo's entry point"
  */
 import { Agent, agentLoop, createDefaultProvider, createAppContext } from "../src/core/index.js";
 
 async function main(): Promise<void> {
   const prompt = process.argv[2];
   if (!prompt) {
-    console.error('usage: tsx examples/headless-agent.ts "your prompt"');
+    console.error('usage: pnpm exec tsx examples/headless-agent.ts "your prompt"');
     process.exit(1);
   }
 

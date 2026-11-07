@@ -20,14 +20,16 @@ consumer; `examples/` shows headless embedding. Model access goes through pi-ai
 
 ## Runtime Constraints
 
-- `src/core/config/index.ts` resolves provider env **lazily** — importing it never throws;
-  `getModel()` and `createDefaultProvider()` throw on first use if env is missing. `main.ts`
-  still wraps the TUI import in a try/catch to render a setup guide on failure.
+- `src/core/config/index.ts` resolves model config **lazily** — importing it never
+  validates model settings. `getModel()` throws if both `MODEL_ID` and `ANTHROPIC_MODEL`
+  are missing; `createDefaultProvider()` resolves the model when called. pi-ai checks
+  credentials on model requests. `main.ts` catches setup errors from TUI startup.
 - ESM with `module`/`moduleResolution: NodeNext`; source imports use the `.js` suffix
   even when importing `.ts` files (`./foo.js` → `./foo.ts`).
 - Tests use `node:test` + `node:assert/strict` through `tsx`; model-loop tests inject a
   scripted `Provider` (`tests/helpers/pi.ts`) into the `Agent` instead of patching a client.
-- `src/core/providers/` is the only layer that imports pi-ai. Do not import vendor SDKs
+- `src/core/providers/` is the only layer with runtime imports from pi-ai; other core
+  modules may use `import type` for its message, model, and tool types. Do not import vendor SDKs
   (`@anthropic-ai/sdk`, `openai`, ...) elsewhere. Provider failures must throw
   `ProviderRequestError` with the HTTP status and `retry-after` preserved, because
   `loop/recovery.ts` classifies on those fields.
@@ -52,6 +54,23 @@ consumer; `examples/` shows headless embedding. Model access goes through pi-ai
 8. Agent context is pi-ai's `Message[]`; tools are pi-ai `Tool` with `parameters`.
    Persisted `lead-messages.json` uses that format; legacy Anthropic transcripts are
    converted on load by `session/store/legacyMessages.ts`.
+
+## Session and async-work contracts
+
+- `SessionController` owns lead-turn admission and wake coalescing. Headless hosts
+  call `handleAutoWake()` explicitly; it may return `undefined`. Pending async work
+  includes both active work and deliverable results. Keep these rules in core.
+- Subagent capacity remains occupied until actual execution settles, including
+  unconfirmed stops. Full capacity rejects new work; do not add an implicit queue.
+- Persisted side effects require awaited intent and result checkpoints through the
+  injected `RuntimeCheckpointSink`. Lifecycle observation cannot confirm a save.
+- `events.jsonl` checkpoints and their referenced private context slots are recovery
+  authority; `snapshot.json` and `lead-messages.json` are derived views. Retain failed
+  batches and block new dispatch after authority-write failure. Unknown outcomes
+  require `resolveRecovery()`; never replay them automatically.
+- `AsyncWorkInbox` owns result identity and delivery state. In managed sessions,
+  acknowledge injected results only after their matching message checkpoint commits.
+  Suppressed or delivered results remain inspectable; cancellation must not delete them.
 
 ## Tools, State, and Docs
 
