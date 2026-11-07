@@ -1,8 +1,8 @@
 # Agent runtime 架构优化与可靠性打磨任务清单
 
-状态：M0–M3 已完成，M4–M5 未开始。依据：[SPEC.md](SPEC.md)、[PLAN.md](PLAN.md)。代码基线：`54551bc`。
+状态：M0–M4 已完成，M5 未开始。依据：[SPEC.md](SPEC.md)、[PLAN.md](PLAN.md)。代码基线：`54551bc`。
 
-用户先前授权完成 M3（T027–T036）并在提交前停止，审阅改动后已授权提交。M3 从 `90a1f21` 的干净工作区开始，按依赖串行实施。SPEC 第 9.9 节记录持久化决策。M0–M2 的授权与验证记录保留供追溯。
+用户先前授权完成 M4（T037–T043）并停在提交前，审阅改动后已授权提交。M4 从 `adfc095` 的干净工作区开始，串行实施；SPEC 第 9.10 节记录异步结果交接与唤醒决策。M0–M3 的授权与验证记录保留供追溯。
 
 ## 1. 使用约定
 
@@ -302,47 +302,54 @@ pnpm format:check
 
 ## 6. M4：异步工作可靠性
 
-- [ ] **T037 完善并发准入与停止中容量占用**
+- [x] **T037 完善并发准入与停止中容量占用**
   - 来源：PLAN M4-01；SPEC C1；V13。依赖：T036。
   - 范围：迁移后的子代理协调模块及工作状态记录。
   - 完成条件：容量判断和启动注册不可交错；满额明确拒绝，不新增排队；实际执行未结束不释放槽位；停止未确认的后续准入策略写清并落实。
   - 验证：`tests/subagent-runner.test.ts`；并发启动、停止中再启动、实际结束后再启动及正常完成均有测试。
+  - 证据：`tests/subagent-runner.test.ts` 的同批 8 次启动仅准入 2 次、停止中拒绝、停止未确认持续占槽和真实结束后补位均通过。原有准入路径在容量判断与登记之间没有异步让出点，保留实现及满额立即拒绝策略，没有增加排队。
 
-- [ ] **T038 验证工作隔离与共享资源归属**
+- [x] **T038 验证工作隔离与共享资源归属**
   - 来源：PLAN M4-01；SPEC L5、C2；V14、V16。依赖：T037。
   - 范围：run/session 归属、后台工作、`src/core/app/context.ts`、MCP 客户端。
   - 完成条件：取消目标 run 只影响其活动后代；正常父完成保留异步工作；session 关闭覆盖全部所属工作；单 MCP 请求取消不关闭共享连接。
   - 验证：两个不同 run 的在途工作与本地 MCP 并发调用；验证真实活动状态，而不只比较任务记录。
+  - 证据：`tests/owned-work-cancellation.test.ts` 验证两个父 run 的真实后台进程及两个在途子代理，取消其一后另一仍活动，正常父完成不取消工作，runtime 关闭停止剩余工作。`tests/mcp-cancellation.test.ts` 新增两个 run 的真实在途 MCP 请求，取消其一不结束另一请求或共享连接；相关聚焦用例及阶段全量测试通过。
 
-- [ ] **T039 实现异步结果的一次结算与消费保护**
+- [x] **T039 实现异步结果的一次结算与消费保护**
   - 来源：PLAN M4-02；SPEC C3、C4；V15、V16。依赖：T038。
   - 范围：`src/core/async/asyncWorkInbox.ts`、子代理/后台结算、`src/core/hooks/runtimeHooks.ts`。
   - 完成条件：稳定身份防止重复入队、重复消费；活动工作集合和待消费结果分开；子代理失败是可关联结果，不产生未处理拒绝。
   - 验证：`tests/async-work-inbox.test.ts`、子代理测试，覆盖重复回调、多工作同时完成、失败及迟到结果。
+  - 证据：`tests/async-work-inbox.test.ts` 验证重复启动/完成、消费后迟到回调、跨种类身份、预留确认和抑制后检查；活动集合与结算结果分开。`tests/subagent-runner.test.ts` 保留关联身份、失败结算与完整结果回归，Node 测试运行未出现未处理拒绝。
 
-- [ ] **T040 将非重入唤醒策略落实到 core**
+- [x] **T040 将非重入唤醒策略落实到 core**
   - 来源：PLAN M4-02；SPEC C3；V15。依赖：T039。
   - 范围：`src/core/session/controller.ts`、`src/core/session/runner.ts`、`src/tui/sessionActions.ts`。
   - 完成条件：主运行准入和唤醒去重不依赖 TUI；忙碌期间不重入，多结果可合并唤醒；取消/关闭后不唤醒，被保留结果仍可检查。
   - 验证：使用 headless controller 模拟同时到达的用户请求和结果通知，断言执行并发、消息及唤醒次数；保留 TUI 回归。
+  - 证据：`tests/session-async-work.test.ts` 通过四个 headless 竞争场景：多结果/重复请求合并、用户轮次期间等待、取消当前运行抑制唤醒、取消旧运行保留另一运行的唤醒。旧用户输入不会因拒绝准入而加入消息；完成但未消费结果继续可见。`tests/runtime-boundaries.test.ts` 同步 pending 语义；TUI actions、组件回归通过。`handleAutoWake()` 无可交付结果或请求失效时返回 `undefined`，见 SPEC 9.10。
 
-- [ ] **T041 将异步结果交接纳入持久化确认**
+- [x] **T041 将异步结果交接纳入持久化确认**
   - 来源：PLAN M4-02；SPEC C3、P3、P4；V15。依赖：T040。
   - 范围：inbox、消息注入 hooks、session 持久化和恢复。
   - 完成条件：结果从队列转入消息到确认保存的全过程遵循 M3 协议；drain 后、消息保存前出错不能静默丢结果；恢复的去重与未决范围明确。
   - 验证：在交接各同步点故障注入并恢复，检查结果既不丢失也不重复应用；不宣称跨崩溃 exactly-once 唤醒。
+  - 证据：`tests/async-result-persistence.test.ts` 的六项真实文件故障/恢复检查覆盖完整结果、注入后确认前失败、部分追加、派生快照失败、完成保存失败与旧 flush 不能确认新交接。`tests/session-crash-recovery.test.ts` 新增 `async_saved`、`async_injected`、`async_confirmed` 三个 IPC 握手后 SIGKILL 窗口；与原五个窗口全部通过。私有槽位随消息保存完整结果和交付/抑制标记，兼容 M3 数组槽位，未保存的完成仍进入未知状态核实。
 
-- [ ] **T042 验证关闭与组合故障**
+- [x] **T042 验证关闭与组合故障**
   - 来源：PLAN M4-03；SPEC C4、L5；V14、V16。依赖：T041。
   - 范围：session/controller、子代理、后台进程、MCP、对应集成 fixture。
   - 完成条件：同时包含权限等待子代理、运行中的 shell、共享 MCP 与完成通知时，重复关闭、清理超时、迟到完成、写入失败均能收尾且不伪报成功。
   - 验证：有限超时下检查一次终态、真实资源状态、重要错误保留和无意外唤醒；失败后清理测试自身资源。
+  - 证据：`tests/session-async-close.test.ts` 的 confirmed、failures、timeout 三种组合均通过：权限等待子代理、真实 shell/后代、共享 MCP 和快速完成通知同时存在。检查重复 close 的同一 Promise、一次终态、进程实际退出、未授权命令未执行、取消后消息不变且不唤醒。预算内独立 provider/save 错误全部保留，超预算资源报告未确认；测试另行等待真实资源回收，未将调用方超时当作退出。
 
-- [ ] **T043 M4 阶段验收**
+- [x] **T043 M4 阶段验收**
   - 来源：PLAN M4-01、M4-02、M4-03；SPEC V13、V14、V15、V16。
   - 依赖：T037、T038、T039、T040、T041、T042。
   - 完成条件：通用阶段检查与 M1/M3 回归通过，更新 PLAN M4 汇总，异步工作管理没有新增隐式队列或双重状态所有者。
   - 验证：每项 V 均有实际测试入口，M1 基本取消和 M3 恢复保证未回退。
+  - 证据：macOS arm64、Node 24.21.0、pnpm 11.0.9；`TERM=xterm-256color pnpm test` 324 项通过，包括 M1 取消、M3 五个原崩溃窗口及三个新增窗口。`pnpm exec tsc --noEmit`、`pnpm typecheck:tests`、`pnpm lint`、`pnpm format:check` 通过；`pnpm build`、两个既有无凭据示例和构建导出的异步交付/恢复消费检查通过。PLAN/SPEC 已同步，M5 保持未开始。初次普通 `pnpm test` 在 `TERM=dumb` 下有三处未改 TUI 的 Unicode/ASCII 断言不符；使用 M3 已记录的终端环境复验通过，没有修改主题或放宽断言。Linux、Windows、线上模型和本阶段实际 TUI 终端操作未执行；用户已审阅改动并授权提交 M4。
 
 ## 7. M5：交付与工程展示
 
@@ -399,7 +406,7 @@ pnpm format:check
 | M1   | T005–T020 | T020 | 已完成   |
 | M2   | T021–T026 | T026 | 已完成   |
 | M3   | T027–T036 | T036 | 已完成   |
-| M4   | T037–T043 | T043 | 未开始   |
+| M4   | T037–T043 | T043 | 已完成   |
 | M5   | T044–T047 | T047 | 未开始   |
 
-M0–M3 的 T001–T036 已完成。下一项为 M4 的 T037。
+M0–M4 的 T001–T043 已完成，用户已授权提交 M4。下一项为 M5 的 T044，不在本次授权范围。

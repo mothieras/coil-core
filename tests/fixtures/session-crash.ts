@@ -5,23 +5,36 @@ import { builtinTool } from "../../src/core/tools/types.js";
 import { assistantMessage, fakeProvider, textMessage, toolCall } from "../helpers/pi.js";
 
 export type CrashWindow =
-  "before_intent" | "after_intent" | "after_effect" | "after_result" | "model_reply";
+  | "before_intent"
+  | "after_intent"
+  | "after_effect"
+  | "after_result"
+  | "model_reply"
+  | "async_saved"
+  | "async_injected"
+  | "async_confirmed";
 
 const workspaceRoot = process.argv[2]!;
 const window = process.argv[3] as CrashWindow;
 const first = toolCall("append_marker", { marker: "first" }, "first");
 const second = toolCall("append_marker", { marker: "second" }, "second");
 const provider = fakeProvider(() =>
-  window === "model_reply"
-    ? textMessage("Reply not yet saved.")
-    : assistantMessage(
-        [
-          { type: "thinking", thinking: "Fixture thought", thinkingSignature: "fixture-signature" },
-          first,
-          second,
-        ],
-        "toolUse",
-      ),
+  window.startsWith("async_")
+    ? textMessage("FULL_ASYNC_RESULT_FROM_CHILD")
+    : window === "model_reply"
+      ? textMessage("Reply not yet saved.")
+      : assistantMessage(
+          [
+            {
+              type: "thinking",
+              thinking: "Fixture thought",
+              thinkingSignature: "fixture-signature",
+            },
+            first,
+            second,
+          ],
+          "toolUse",
+        ),
 );
 const controller = await SessionController.createNew({
   workspaceRoot,
@@ -30,6 +43,28 @@ const controller = await SessionController.createNew({
   provider,
 });
 await controller.flush();
+if (window.startsWith("async_")) {
+  const completed = Promise.withResolvers<void>();
+  controller.appContext.inbox.subscribe((notification) => {
+    if (notification.status !== "running") completed.resolve();
+  });
+  controller.appContext.subAgentRunner.run(controller.leadAgentState, "child result", {
+    sessionId: "crash",
+  });
+  await completed.promise;
+  await controller.flush();
+  if (window === "async_saved") await awaitKill();
+  const append = fs.appendFile;
+  fs.appendFile = async (...args) => {
+    const handoff =
+      String(args[0]).endsWith("events.jsonl") && String(args[1]).includes('"awaitingModel":true');
+    if (handoff && window === "async_injected") await awaitKill();
+    await append(...args);
+    if (handoff && window === "async_confirmed") await awaitKill();
+  };
+  await controller.handleAutoWake("async_work_finished");
+  throw new Error(`Crash window ${window} was not reached`);
+}
 controller.appContext.toolRuntime.registerTool(
   builtinTool(
     {

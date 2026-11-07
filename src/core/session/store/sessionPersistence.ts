@@ -4,9 +4,20 @@ import type { SessionProjectionStore } from "../projection/projectionStore.js";
 import type { SessionEvent, SessionSnapshot } from "../types.js";
 import type { SessionJournal } from "./sessionJournal.js";
 import type { SessionStore } from "./sessionStore.js";
+import type { AsyncWorkInbox, AsyncWorkResultState } from "../../async/asyncWorkInbox.js";
 
-type LeadContext = { messages: readonly Message[]; awaitingModel: boolean; revision: number };
-type Batch = { events: readonly SessionEvent[]; snapshot: SessionSnapshot; lead: LeadContext };
+type LeadContext = {
+  messages: readonly Message[];
+  awaitingModel: boolean;
+  revision: number;
+  deliveredIds: readonly string[];
+};
+type Batch = {
+  events: readonly SessionEvent[];
+  snapshot: SessionSnapshot;
+  lead: LeadContext;
+  asyncResults: readonly AsyncWorkResultState[];
+};
 
 /** Orders authority writes and keeps the exact in-flight batch until acknowledged. */
 export class SessionPersistence {
@@ -22,8 +33,14 @@ export class SessionPersistence {
     private readonly projection: SessionProjectionStore,
     private readonly store: SessionStore,
     messages: readonly Message[],
+    private readonly inbox: AsyncWorkInbox,
   ) {
-    this.lead = { messages: structuredClone(messages), awaitingModel: false, revision: 0 };
+    this.lead = {
+      messages: structuredClone(messages),
+      awaitingModel: false,
+      revision: 0,
+      deliveredIds: [],
+    };
   }
 
   setLead(messages: readonly Message[], awaitingModel = false): void {
@@ -31,7 +48,12 @@ export class SessionPersistence {
   }
 
   captureLead(messages: readonly Message[], awaitingModel: boolean): () => void {
-    const lead = { messages: structuredClone(messages), awaitingModel, revision: ++this.revision };
+    const lead = {
+      messages: structuredClone(messages),
+      awaitingModel,
+      revision: ++this.revision,
+      deliveredIds: this.inbox.stagedIds(),
+    };
     return () => {
       // A cancelled run can finish pairing its messages while a write is queued.
       if (lead.revision > this.lead.revision) this.lead = lead;
@@ -86,6 +108,7 @@ export class SessionPersistence {
       events: structuredClone(this.projection.getPending()),
       snapshot: this.projection.getSnapshot(),
       lead: this.lead,
+      asyncResults: this.inbox.captureResults(this.lead.deliveredIds),
     };
     this.inFlight = batch;
     await this.write(batch);
@@ -93,8 +116,14 @@ export class SessionPersistence {
   }
 
   private async write(batch: Batch): Promise<void> {
-    await this.journal.commit(batch.events, batch.lead.messages, batch.lead.awaitingModel);
+    await this.journal.commit(
+      batch.events,
+      batch.lead.messages,
+      batch.lead.awaitingModel,
+      batch.asyncResults,
+    );
     this.projection.acknowledge(batch.events.length);
+    this.inbox.acknowledgeNotifications(batch.lead.deliveredIds);
     this.inFlight = undefined;
   }
 }

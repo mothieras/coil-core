@@ -230,6 +230,47 @@ test("run() refuses to exceed the concurrency cap", async () => {
   await waitUntilSettled(runner);
 });
 
+test(
+  "simultaneous admissions reserve capacity before starting any child",
+  { timeout: 5_000 },
+  async () => {
+    const responses = Promise.withResolvers<ReturnType<typeof textMessage>>();
+    const entered = Promise.withResolvers<void>();
+    let started = 0;
+    const parent = parentAgent(
+      okRuntime(),
+      fakeProvider(() => {
+        started++;
+        if (started === 2) entered.resolve();
+        return responses.promise;
+      }),
+    );
+    const runner = new SubAgentRunner(2);
+    try {
+      const admissions = await Promise.allSettled(
+        Array.from({ length: 8 }, (_, index) =>
+          Promise.resolve().then(() => runner.run(parent, `job ${index}`)),
+        ),
+      );
+      assert.equal(admissions.filter((result) => result.status === "fulfilled").length, 2);
+      for (const result of admissions) {
+        if (result.status === "rejected") assert.match(String(result.reason), /Too many/);
+      }
+      await entered.promise;
+      assert.equal(started, 2);
+      responses.resolve(textMessage("done"));
+      await waitUntilSettled(runner);
+      assert.equal(runner.hasRunning(), false);
+      assert.match(runner.run(parent, "next"), /started/);
+      await waitUntilSettled(runner);
+      assert.equal(started, 3);
+    } finally {
+      responses.resolve(textMessage("cleanup"));
+      await runner.cancelAll();
+    }
+  },
+);
+
 test("hasRunning() reflects in-flight subagents", async () => {
   const runner = new SubAgentRunner();
   assert.equal(runner.hasRunning(), false);

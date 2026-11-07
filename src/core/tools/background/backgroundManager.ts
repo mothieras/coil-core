@@ -59,6 +59,7 @@ export class BackgroundManager {
       status: "running",
       result: "",
       record: { ...record },
+      ownerRunId: record.runId,
     });
     task.done = process.done
       .then(
@@ -85,6 +86,7 @@ export class BackgroundManager {
           status: record.status,
           result: record.resultSummary ?? "",
           record: { ...record },
+          ownerRunId: record.runId,
         });
       });
     if (context?.runId)

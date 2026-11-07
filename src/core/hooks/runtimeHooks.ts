@@ -24,7 +24,24 @@ function agentName(): string {
   return currentAgent.getStore()?.id ?? "lead";
 }
 
-export function registerRuntimeHooks(app: AppContext): void {
+const installed = new WeakSet<AppContext>();
+const asyncInstalled = new WeakSet<AppContext>();
+
+type RuntimeHookOptions = { deferAsyncAcknowledgment?: boolean; leadAgentId?: string };
+
+export function registerAsyncWorkHooks(app: AppContext, options: RuntimeHookOptions = {}): void {
+  if (asyncInstalled.has(app)) return;
+  asyncInstalled.add(app);
+  app.hooks.register("PreLLMCall", (messages) => {
+    if (agentName() !== (options.leadAgentId ?? "lead")) return;
+    injectAsyncWorkResults(app, messages, options.deferAsyncAcknowledgment ?? false);
+  });
+}
+
+export function registerRuntimeHooks(app: AppContext, options: RuntimeHookOptions = {}): void {
+  registerAsyncWorkHooks(app, options);
+  if (installed.has(app)) return;
+  installed.add(app);
   const taskStates = new Map<string, TaskLoopState>();
   const taskState = () => getTaskState(taskStates, agentName());
 
@@ -34,7 +51,6 @@ export function registerRuntimeHooks(app: AppContext): void {
 
   app.hooks.register("PreLLMCall", (messages) => {
     injectTaskStatus(app, taskState(), messages);
-    injectAsyncWorkResults(app, messages);
   });
 
   app.hooks.register("PostToolUse", (block) => {
@@ -64,9 +80,8 @@ function injectTaskStatus(app: AppContext, state: TaskLoopState, messages: Messa
   state.showTaskStatus = false;
 }
 
-function injectAsyncWorkResults(app: AppContext, messages: Message[]): void {
-  if (agentName() !== "lead") return;
-  const drained = app.inbox.drainNotifications();
+function injectAsyncWorkResults(app: AppContext, messages: Message[], defer: boolean): void {
+  const drained = defer ? app.inbox.stageNotifications() : app.inbox.drainNotifications();
   if (drained.length === 0) return;
   const background = drained.filter((n) => n.kind === "background");
   const subagent = drained.filter((n) => n.kind === "subagent");

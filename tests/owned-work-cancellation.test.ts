@@ -75,3 +75,67 @@ test(
     }
   },
 );
+
+test(
+  "cancelling one parent stops only its active child; runtime close stops the other",
+  { timeout: 10_000 },
+  async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "coil-owned-children-"));
+    const app = createAppContext(dir);
+    const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const stopped = new Set<number>();
+    const runs = [];
+    try {
+      for (const index of [0, 1]) {
+        let turns = 0;
+        const agent = new Agent({
+          id: `parent-${index}`,
+          workspaceRoot: dir,
+          toolRuntime: app.toolRuntime,
+          provider: fakeProvider((request, call) => {
+            if (!request.system?.startsWith("You are a subagent"))
+              return ++turns === 1
+                ? toolCallMessage([toolCall("subagent", { prompt: `child ${index}` })])
+                : textMessage("parent done");
+            entered[index]!.resolve();
+            return new Promise((resolve) => {
+              call.options?.signal?.addEventListener(
+                "abort",
+                () => {
+                  stopped.add(index);
+                  resolve(textMessage("stopped"));
+                },
+                { once: true },
+              );
+            });
+          }),
+        });
+        const run = createAgentRun({
+          agentId: agent.id!,
+          agentKind: "lead",
+          sessionId: "owned",
+          trigger: { type: "user_message" },
+        });
+        runs.push(run);
+        await app.agentRuntime.run(agent, run);
+        await entered[index]!.promise;
+        assert.equal(run.status, "completed");
+      }
+      assert.deepEqual([...stopped], []);
+      const original = structuredClone(runs[0]);
+      assert.equal((await app.agentRuntime.cancelRun(runs[0]!.id)).status, "descendants_only");
+      assert.deepEqual([...stopped], [0]);
+      assert.equal(app.subAgentRunner.hasRunning(), true);
+      assert.deepEqual(runs[0], original);
+      await app.agentRuntime.close();
+      await app.subAgentRunner.cancelAll();
+      assert.deepEqual([...stopped], [0, 1]);
+      assert.equal(app.subAgentRunner.hasRunning(), false);
+      assert.deepEqual(app.inbox.drainNotifications(), []);
+    } finally {
+      await app.agentRuntime.close();
+      await app.subAgentRunner.cancelAll();
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);

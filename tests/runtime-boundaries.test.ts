@@ -610,7 +610,7 @@ test("subagent results inject in lead context only, not in subagent context", as
   }
 });
 
-test("hasPendingAsyncWork reflects running subagents", async () => {
+test("hasPendingAsyncWork includes running subagents and their unconsumed results", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "agent-runtime-"));
   try {
     const app = createAppContext(workspace);
@@ -629,13 +629,16 @@ test("hasPendingAsyncWork reflects running subagents", async () => {
     while (app.subAgentRunner.hasRunning()) {
       await new Promise((resolve) => setImmediate(resolve));
     }
+    assert.equal(app.inbox.hasPending(), false);
+    assert.equal(hasPendingAsyncWork(app), true);
+    assert.equal(app.inbox.drainNotifications().length, 1);
     assert.equal(hasPendingAsyncWork(app), false);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
-test("hasPendingAsyncWork reflects running background tasks", async () => {
+test("hasPendingAsyncWork includes running background tasks and their unconsumed results", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "agent-runtime-"));
   try {
     const app = createAppContext(workspace);
@@ -649,6 +652,8 @@ test("hasPendingAsyncWork reflects running background tasks", async () => {
     while (app.inbox.hasPending()) {
       await new Promise((resolve) => setImmediate(resolve));
     }
+    assert.equal(hasPendingAsyncWork(app), true);
+    assert.equal(app.inbox.drainNotifications().length, 1);
     assert.equal(hasPendingAsyncWork(app), false);
   } finally {
     await rm(workspace, { recursive: true, force: true });

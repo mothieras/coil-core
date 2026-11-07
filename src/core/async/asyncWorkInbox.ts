@@ -13,55 +13,127 @@ export interface AsyncWorkNotification {
   status: AsyncWorkStatus;
   result: string;
   taskId?: string | undefined;
+  ownerRunId?: string | undefined;
   record: unknown;
 }
 
 export type AsyncWorkListener = (notification: AsyncWorkNotification) => void;
 
-/**
- * Single delivery point for async work (subagents + background commands).
- * Owns the pending-set (UI wake via hasPending), the settled-notification
- * queue (the PreLLMCall hook drains it), and a subscriber fan-out that fires
- * on register (started) and settle (finished/interrupted) so the session
- * layer can record subagent_ and background_ events. Dependency-neutral.
- */
+/** A settled result remains inspectable after delivery or wake suppression. */
+export type AsyncWorkResultState = {
+  notification: AsyncWorkNotification;
+  delivered: boolean;
+  suppressed: boolean;
+};
+
+/** Owns active identities and one settled result per identity, independently. */
 export class AsyncWorkInbox {
-  private readonly running = new Set<string>();
-  private notifications: AsyncWorkNotification[] = [];
+  private readonly running = new Map<string, AsyncWorkNotification>();
+  private readonly results = new Map<string, AsyncWorkResultState>();
   private readonly suppressed = new Set<string>();
+  private readonly staged = new Set<string>();
+  private suppressFuture = false;
+  private readonly listeners = new Set<AsyncWorkListener>();
 
   suppress(kind: AsyncWorkKind, id: string): void {
     const identity = key(kind, id);
     this.suppressed.add(identity);
-    this.notifications = this.notifications.filter((n) => key(n.kind, n.id) !== identity);
+    const result = this.results.get(identity);
+    if (result) result.suppressed = true;
+  }
+
+  suppressRun(runId: string): void {
+    for (const notification of [...this.running.values(), ...this.getResults()]) {
+      if (notification.ownerRunId === runId) this.suppress(notification.kind, notification.id);
+    }
   }
 
   suppressAll(): void {
-    for (const identity of this.running) this.suppressed.add(identity);
-    this.notifications = [];
+    this.suppressFuture = true;
+    for (const notification of [...this.running.values(), ...this.getResults()])
+      this.suppress(notification.kind, notification.id);
   }
-  private readonly listeners = new Set<AsyncWorkListener>();
 
   register(notification: AsyncWorkNotification): void {
-    this.running.add(key(notification.kind, notification.id));
+    const identity = key(notification.kind, notification.id);
+    if (this.running.has(identity) || this.results.has(identity)) return;
+    this.running.set(identity, notification);
+    if (this.suppressFuture) this.suppress(notification.kind, notification.id);
     this.emit(notification);
   }
 
   settle(notification: AsyncWorkNotification): void {
-    this.running.delete(key(notification.kind, notification.id));
-    if (!this.suppressed.has(key(notification.kind, notification.id)))
-      this.notifications.push(notification);
+    const identity = key(notification.kind, notification.id);
+    if (this.results.has(identity)) return;
+    this.running.delete(identity);
+    this.results.set(identity, {
+      notification,
+      delivered: false,
+      suppressed: this.suppressFuture || this.suppressed.has(identity),
+    });
     this.emit(notification);
   }
 
   hasPending(): boolean {
-    return [...this.running].some((identity) => !this.suppressed.has(identity));
+    return [...this.running.keys()].some((identity) => !this.suppressed.has(identity));
+  }
+
+  hasNotifications(): boolean {
+    return [...this.results].some(([identity, result]) => this.deliverable(identity, result));
+  }
+
+  getResults(): AsyncWorkNotification[] {
+    return [...this.results.values()].map((result) => result.notification);
+  }
+
+  /** Reserve results for message injection; release only after the matching save. */
+  stageNotifications(): AsyncWorkNotification[] {
+    const notifications: AsyncWorkNotification[] = [];
+    for (const [identity, result] of this.results) {
+      if (!this.deliverable(identity, result)) continue;
+      this.staged.add(identity);
+      notifications.push(result.notification);
+    }
+    return notifications;
+  }
+
+  stagedIds(): string[] {
+    return [...this.staged];
+  }
+
+  acknowledgeNotifications(identities: readonly string[]): void {
+    for (const identity of identities) {
+      const result = this.results.get(identity);
+      if (result) result.delivered = true;
+      this.staged.delete(identity);
+    }
   }
 
   drainNotifications(): AsyncWorkNotification[] {
-    const drained = this.notifications.slice();
-    this.notifications = [];
-    return drained;
+    const notifications = this.stageNotifications();
+    this.acknowledgeNotifications(
+      notifications.map((notification) => key(notification.kind, notification.id)),
+    );
+    return notifications;
+  }
+
+  captureResults(deliveredIds: readonly string[] = []): AsyncWorkResultState[] {
+    const delivered = new Set(deliveredIds);
+    return structuredClone(
+      [...this.results].map(([identity, result]) => ({
+        ...result,
+        delivered: result.delivered || delivered.has(identity),
+      })),
+    );
+  }
+
+  restoreResults(results: readonly AsyncWorkResultState[]): void {
+    for (const result of results) {
+      const { kind, id } = result.notification;
+      const identity = key(kind, id);
+      if (!this.results.has(identity)) this.results.set(identity, structuredClone(result));
+      if (result.suppressed) this.suppressed.add(identity);
+    }
   }
 
   subscribe(listener: AsyncWorkListener): () => void {
@@ -69,6 +141,10 @@ export class AsyncWorkInbox {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  private deliverable(identity: string, result: AsyncWorkResultState): boolean {
+    return !result.delivered && !result.suppressed && !this.staged.has(identity);
   }
 
   private emit(notification: AsyncWorkNotification): void {

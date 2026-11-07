@@ -85,3 +85,73 @@ test("a throwing subscriber does not break register/settle", () => {
   );
   assert.equal(inbox.drainNotifications().length, 1);
 });
+
+test("duplicate starts and settlements cannot reopen work or redeliver a result", () => {
+  const inbox = new AsyncWorkInbox();
+  const running = {
+    id: "same",
+    kind: "subagent" as const,
+    status: "running" as const,
+    result: "",
+    record: {},
+  };
+  const finished = { ...running, status: "error" as const, result: "failed" };
+  const events: string[] = [];
+  inbox.subscribe((event) => events.push(event.status));
+  inbox.register(running);
+  inbox.register(running);
+  inbox.settle(finished);
+  inbox.settle(finished);
+  assert.deepEqual(inbox.drainNotifications(), [finished]);
+  inbox.register(running);
+  inbox.settle({ ...finished, result: "late success" });
+  assert.equal(inbox.hasPending(), false);
+  assert.deepEqual(inbox.drainNotifications(), []);
+  assert.deepEqual(events, ["running", "error"]);
+});
+
+test("suppression retains settled results for inspection while excluding automatic delivery", () => {
+  const inbox = new AsyncWorkInbox();
+  const finished = {
+    id: "one",
+    kind: "background" as const,
+    status: "completed" as const,
+    result: "kept",
+    record: {},
+  };
+  inbox.settle(finished);
+  inbox.suppressAll();
+  inbox.settle({ ...finished, id: "late" });
+  assert.deepEqual(inbox.drainNotifications(), []);
+  assert.deepEqual(
+    inbox.getResults().map((result) => result.result),
+    ["kept", "kept"],
+  );
+});
+
+test("staged results wait for their own acknowledgement and survive inspection", () => {
+  const inbox = new AsyncWorkInbox();
+  const result = {
+    id: "staged",
+    kind: "subagent" as const,
+    status: "completed" as const,
+    result: "full result",
+    record: {},
+  };
+  inbox.settle(result);
+  assert.deepEqual(inbox.stageNotifications(), [result]);
+  assert.deepEqual(inbox.drainNotifications(), []);
+  assert.equal(inbox.captureResults()[0]?.delivered, false);
+  const ids = inbox.stagedIds();
+  const checkpoint = inbox.captureResults(ids);
+  assert.equal(checkpoint[0]?.delivered, true);
+  assert.equal(inbox.captureResults()[0]?.delivered, false);
+  inbox.acknowledgeNotifications(ids);
+  assert.equal(inbox.captureResults()[0]?.delivered, true);
+  const recovered = new AsyncWorkInbox();
+  recovered.restoreResults(checkpoint);
+  recovered.register({ ...result, status: "running" });
+  recovered.settle(result);
+  assert.equal(recovered.hasPending(), false);
+  assert.deepEqual(recovered.drainNotifications(), []);
+});

@@ -110,6 +110,7 @@ export class SubAgentRunner {
       status: "running",
       result: "",
       record: this.recordFor(subId, entry),
+      ownerRunId: options.parentRunId,
       ...(entry.taskId !== undefined ? { taskId: entry.taskId } : {}),
     });
 
@@ -175,6 +176,7 @@ export class SubAgentRunner {
       status,
       result: result || "(no output)",
       record: this.recordFor(subId, t),
+      ownerRunId: t.run.trigger.type === "subagent" ? t.run.trigger.parentRunId : undefined,
       ...(t.taskId !== undefined ? { taskId: t.taskId } : {}),
     });
   }

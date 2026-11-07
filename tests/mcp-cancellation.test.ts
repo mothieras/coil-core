@@ -11,7 +11,7 @@ import { createMcpHandler } from "../src/core/tools/mcp/handler.js";
 import { createAppContext } from "../src/core/app/context.js";
 import { Agent } from "../src/core/agent/agent.js";
 import { createAgentRun } from "../src/core/agent/run.js";
-import { fakeProvider, toolCallMessage, toolCall } from "./helpers/pi.js";
+import { fakeProvider, textMessage, toolCallMessage, toolCall } from "./helpers/pi.js";
 
 test(
   "cancelling a real shared MCP call reports unknown without closing another call's connection",
@@ -150,6 +150,92 @@ test(
       await client.callTool("release", {});
     } finally {
       await client.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "two runs share an MCP connection and cancelling one leaves the other request active",
+  { timeout: 10_000 },
+  async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "coil-mcp-isolation-"));
+    const marker = path.join(dir, "entered");
+    const client = new StdioMcpClient({
+      name: "fixture",
+      command: process.execPath,
+      args: [
+        "--import",
+        "tsx",
+        fileURLToPath(new URL("./fixtures/cancellation-mcp-server.ts", import.meta.url)),
+        marker,
+      ],
+    });
+    const app = createAppContext(dir);
+    const running: Promise<unknown>[] = [];
+    try {
+      const runs = [];
+      for (const suffix of ["", "2"]) {
+        const source = {
+          type: "mcp" as const,
+          serverName: "fixture",
+          originalName: `wait${suffix}`,
+        };
+        const name = `remote${suffix}`;
+        app.toolRuntime.registerTool({
+          name,
+          definition: {
+            name,
+            description: "fixture",
+            parameters: { type: "object", properties: {} },
+          },
+          source,
+          handler: createMcpHandler(client, source),
+        });
+        let calls = 0;
+        const agent = new Agent({
+          id: `lead${suffix}`,
+          toolRuntime: app.toolRuntime,
+          provider: fakeProvider(() =>
+            ++calls === 1 ? toolCallMessage([toolCall(name)]) : textMessage("done"),
+          ),
+        });
+        const run = createAgentRun({
+          agentId: agent.id!,
+          agentKind: "lead",
+          sessionId: "shared",
+          trigger: { type: "user_message" },
+        });
+        runs.push(run);
+        running.push(app.agentRuntime.run(agent, run));
+      }
+      for (const suffix of ["", "2"]) {
+        const deadline = Date.now() + 3_000;
+        while (true) {
+          try {
+            await readFile(`${marker}${suffix}`);
+            break;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT" || Date.now() >= deadline)
+              throw error;
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+        }
+      }
+      const cancelled = await app.agentRuntime.cancelRun(runs[0]!.id, "user", Date.now());
+      assert.equal(cancelled.cleanup?.status, "unconfirmed");
+      assert.equal(runs[1]!.status, "running");
+      assert.match(JSON.stringify(await client.callTool("echo", {})), /echo complete/);
+      await client.callTool("release2", {});
+      await running[1];
+      assert.equal(runs[1]!.status, "completed");
+      await client.callTool("release", {});
+      await app.agentRuntime.whenSettled(runs[0]!.id);
+      assert.equal(runs[0]!.status, "interrupted");
+    } finally {
+      await client.close();
+      await Promise.allSettled(running);
+      await app.agentRuntime.close();
       await rm(dir, { recursive: true, force: true });
     }
   },

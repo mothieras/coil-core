@@ -772,6 +772,13 @@ test("SessionController.handleAutoWake records an auto-wake agent run", async ()
       provider,
     });
 
+    controller.appContext.inbox.settle({
+      id: "ready",
+      kind: "subagent",
+      status: "completed",
+      result: "done",
+      record: { id: "ready", status: "completed", promptSummary: "work", resultSummary: "done" },
+    });
     await controller.handleAutoWake("subagent_finished");
 
     assert.equal(controller.getSnapshot().agentRuns[0]?.trigger.type, "auto_wake");

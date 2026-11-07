@@ -8,7 +8,10 @@ import {
   ExecutionStoppedError,
   throwIfAborted,
 } from "../loop/cancellation.js";
-import { registerRuntimeHooks as installRuntimeHooks } from "../hooks/runtimeHooks.js";
+import {
+  registerAsyncWorkHooks,
+  registerRuntimeHooks as installRuntimeHooks,
+} from "../hooks/runtimeHooks.js";
 import type {
   RuntimeCheckpoint,
   RuntimeLifecycleEvent,
@@ -19,7 +22,7 @@ import type { Provider } from "../providers/index.js";
 import { createLeadAgent } from "./leadAgent.js";
 import type { BackgroundCommandRecord } from "../tools/background/backgroundManager.js";
 import type { SubagentRecord } from "../agent/subagentRunner.js";
-import type { AsyncWorkNotification } from "../async/asyncWorkInbox.js";
+import type { AsyncWorkNotification, AsyncWorkResultState } from "../async/asyncWorkInbox.js";
 import type { TaskRecord } from "../tools/task/taskManager.js";
 import type { ToolProviderLoadResult } from "../tools/types.js";
 import type { SessionCommandResult, SessionCompactResult } from "./commands/actions.js";
@@ -97,6 +100,7 @@ type BuildSessionControllerOptions = {
   provider?: Provider | undefined;
   leadMessages?: Message[] | undefined;
   snapshot?: SessionSnapshot | undefined;
+  asyncResults?: readonly AsyncWorkResultState[] | undefined;
   toolProviderResults?: ToolProviderLoadResult[] | undefined;
 };
 
@@ -111,6 +115,8 @@ export class SessionController implements RuntimeLifecycleSink {
   private readonly auxiliary = new ExecutionScope();
   private turnDone?: Promise<unknown[]>;
   private editingContext = false;
+  private wakePromise: Promise<SessionAutoWakeResult | undefined> | undefined;
+  private wakeGeneration = 0;
 
   private assertOpen(): void {
     if (this.closing) throw new Error("Session is closing");
@@ -127,6 +133,19 @@ export class SessionController implements RuntimeLifecycleSink {
     const target =
       runId ?? this.getSnapshot().agentRuns.findLast((run) => run.agentKind === "lead")?.id;
     if (!target) return Promise.resolve({ status: "unknown", runId: "" });
+    if (
+      this.getSnapshot().agentRuns.some(
+        (run) =>
+          run.id === target &&
+          run.agentKind === "lead" &&
+          (run.status === "running" || run.status === "stopping"),
+      )
+    )
+      this.wakeGeneration++;
+    this.app.inbox.suppressRun(target);
+    for (const subagent of this.getSnapshot().subagents) {
+      if (subagent.runId === target) this.app.inbox.suppress("subagent", subagent.id);
+    }
     return this.app.agentRuntime.cancelRun(target);
   }
 
@@ -207,6 +226,7 @@ export class SessionController implements RuntimeLifecycleSink {
       provider: options.provider,
       leadMessages,
       snapshot,
+      asyncResults: recovered?.asyncResults,
       toolProviderResults: options.toolProviderResults,
     });
     if (legacy) {
@@ -268,6 +288,7 @@ export class SessionController implements RuntimeLifecycleSink {
       provider: options.provider,
       messages: options.leadMessages,
     });
+    app.inbox.restoreResults(options.asyncResults ?? []);
     const projectionStore = new SessionProjectionStore(options.snapshot);
     controller = new SessionController(
       options.session,
@@ -280,6 +301,7 @@ export class SessionController implements RuntimeLifecycleSink {
         projectionStore,
         options.store,
         leadAgent.messages,
+        app.inbox,
       ),
     );
     app.inbox.subscribe((n) => controller.recordAsyncWork(n));
@@ -300,6 +322,10 @@ export class SessionController implements RuntimeLifecycleSink {
       workspaceRoot: options.workspaceRoot,
       isBusy: () => controller.running,
       emit: (e) => projectionStore.record(runtimeLifecycleRecordedEvent(options.session.id, e)),
+    });
+    registerAsyncWorkHooks(app, {
+      deferAsyncAcknowledgment: true,
+      leadAgentId: leadAgent.id ?? "lead",
     });
     return controller;
   }
@@ -429,10 +455,25 @@ export class SessionController implements RuntimeLifecycleSink {
     }
   }
 
-  async handleAutoWake(
+  handleAutoWake(
     reason: "async_work_finished" | "background_finished" | "subagent_finished",
-  ): Promise<SessionAutoWakeResult> {
-    return this.runTurn(() => this.runner.runAutoWake(reason));
+  ): Promise<SessionAutoWakeResult | undefined> {
+    if (this.wakePromise) return this.wakePromise;
+    const generation = this.wakeGeneration;
+    const wake = async () => {
+      // One wake request may wait for the current turn; notifications stay in the inbox.
+      if (this.running) await this.turnDone;
+      if (this.closing || generation !== this.wakeGeneration) return undefined;
+      this.assertRecoveryClear();
+      this.persistence.assertWritable();
+      if (this.running || this.editingContext || !this.app.inbox.hasNotifications())
+        return undefined;
+      return this.runTurn(() => this.runner.runAutoWake(reason));
+    };
+    this.wakePromise = wake().finally(() => {
+      this.wakePromise = undefined;
+    });
+    return this.wakePromise;
   }
 
   getSnapshot(): SessionSnapshot {
@@ -440,11 +481,12 @@ export class SessionController implements RuntimeLifecycleSink {
   }
 
   registerRuntimeHooks(): void {
-    installRuntimeHooks(this.app);
+    installRuntimeHooks(this.app, { deferAsyncAcknowledgment: true });
   }
 
   hasPendingAsyncWork(): boolean {
-    if (this.getSnapshot().recovery?.pending.length || this.persistence.failure) return false;
+    if (this.closing || this.getSnapshot().recovery?.pending.length || this.persistence.failure)
+      return false;
     return this.runner.hasPendingAsyncWork();
   }
 
@@ -454,12 +496,14 @@ export class SessionController implements RuntimeLifecycleSink {
       shouldStop?: (() => boolean) | undefined;
     } = {},
   ): Promise<"completed" | "interrupted"> {
+    this.persistence.assertWritable();
     const pollMs = options.pollMs ?? 500;
-    while (this.hasPendingAsyncWork()) {
+    while (this.hasPendingAsyncWork() && !this.app.inbox.hasNotifications()) {
       if (options.shouldStop?.()) return "interrupted";
       await new Promise((resolve) => setTimeout(resolve, pollMs));
     }
     if (options.shouldStop?.()) return "interrupted";
+    this.persistence.assertWritable();
     return "completed";
   }
 
@@ -624,6 +668,7 @@ export class SessionController implements RuntimeLifecycleSink {
           );
       }
     }
+    if (this.persistence.failure) errors.push(this.persistence.failure.cause);
     try {
       await this.bounded(this.app.closeToolProviders(), deadline, "tool providers");
     } catch (error) {
@@ -705,6 +750,10 @@ export class SessionController implements RuntimeLifecycleSink {
       const record = notification.record as BackgroundCommandRecord;
       if (notification.status === "running") this.recordBackgroundStarted(record);
       else this.recordBackgroundFinished(record);
+    }
+    if (notification.status !== "running") {
+      // Confirm idle completions too. Persistence retains failures and blocks new work.
+      void this.persistence.confirm(() => {}).catch(() => {});
     }
   }
 }

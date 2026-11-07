@@ -22,6 +22,43 @@ const windows: CrashWindow[] = [
   "model_reply",
 ];
 
+for (const window of ["async_saved", "async_injected", "async_confirmed"] as const) {
+  test(
+    `recovers async result handoff after real process crash at ${window}`,
+    { timeout: 15_000 },
+    async (t) => {
+      const workspaceRoot = await fs.mkdtemp(path.join(tmpdir(), "coil-async-crash-"));
+      t.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
+      await crash(workspaceRoot, window);
+      const provider = fakeProvider(() => textMessage("collected"));
+      const options = { workspaceRoot, sessionId: "crash", provider };
+      const controller = await SessionController.resume(options);
+      const applied = () =>
+        controller.leadAgentState.messages.filter(
+          (message) =>
+            message.role === "user" &&
+            typeof message.content === "string" &&
+            message.content.includes("FULL_ASYNC_RESULT_FROM_CHILD"),
+        );
+      assert.deepEqual(controller.getSnapshot().recovery?.pending, []);
+      assert.equal(
+        controller.appContext.inbox.getResults()[0]?.result,
+        "FULL_ASYNC_RESULT_FROM_CHILD",
+      );
+      assert.equal(applied().length, window === "async_confirmed" ? 1 : 0);
+      assert.equal(controller.hasPendingAsyncWork(), window !== "async_confirmed");
+      await controller.handleAutoWake("async_work_finished");
+      assert.equal(applied().length, 1);
+      assert.equal(provider.calls.length, window === "async_confirmed" ? 0 : 1);
+      await controller.flush();
+      const reopened = await SessionController.resume(options);
+      assert.equal(await reopened.handleAutoWake("async_work_finished"), undefined);
+      assert.equal(provider.calls.length, window === "async_confirmed" ? 0 : 1);
+      await reopened.close();
+    },
+  );
+}
+
 async function crash(workspace: string, window: CrashWindow): Promise<void> {
   const child = fork(fixture, [workspace, window], {
     execArgv: ["--import", "tsx"],

@@ -240,6 +240,10 @@ export function leadAgentStateSavedEvent(
 }
 
 function summarizeLeadAgentMessage(message: Message): LeadAgentMessageProjection {
+  if (message.role === "user" && typeof message.content === "string") {
+    const tag = message.content.match(/^<(background-results|subagent-results)>/);
+    if (tag) return { role: message.role, contentSummary: `[${tag[1]}]` };
+  }
   if (message.role === "toolResult") {
     return {
       role: message.role,

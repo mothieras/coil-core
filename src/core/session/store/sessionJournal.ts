@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type { SessionEvent } from "../types.js";
+import type { AsyncWorkResultState } from "../../async/asyncWorkInbox.js";
 import { writeAtomic } from "./atomicFile.js";
 
 type ContextRef = { slot: 0 | 1; digest: string };
@@ -20,6 +21,7 @@ type JournalRecovery = {
   events: SessionEvent[];
   messages: Message[];
   awaitingModel: boolean;
+  asyncResults: AsyncWorkResultState[];
 };
 
 const JOURNAL = "events.jsonl";
@@ -117,14 +119,36 @@ export class SessionJournal {
     } catch {
       throw this.corrupt("invalid checkpoint context");
     }
-    if (!Array.isArray(messages)) throw this.corrupt("invalid checkpoint context");
-    return { events, messages: messages as Message[], awaitingModel: this.last.awaitingModel };
+    // Earlier version-1 contexts contain only the pi-ai message array.
+    let asyncResults: AsyncWorkResultState[] = [];
+    if (!Array.isArray(messages)) {
+      const context = messages as {
+        version?: unknown;
+        messages?: unknown;
+        asyncResults?: unknown;
+      } | null;
+      if (
+        context?.version !== 1 ||
+        !Array.isArray(context.messages) ||
+        !validAsyncResults(context.asyncResults)
+      )
+        throw this.corrupt("invalid checkpoint context");
+      asyncResults = context.asyncResults;
+      messages = context.messages;
+    }
+    return {
+      events,
+      messages: messages as Message[],
+      awaitingModel: this.last.awaitingModel,
+      asyncResults,
+    };
   }
 
   async commit(
     events: readonly SessionEvent[],
     messages: readonly Message[],
     awaitingModel: boolean,
+    asyncResults: readonly AsyncWorkResultState[] = [],
   ): Promise<void> {
     if (this.offset === 0) await this.initialize();
     if (this.truncatedPrefix) {
@@ -133,7 +157,9 @@ export class SessionJournal {
       this.truncatedPrefix = undefined;
     }
 
-    const body = JSON.stringify(messages);
+    const body = JSON.stringify(
+      asyncResults.length ? { version: 1, messages, asyncResults } : messages,
+    );
     const digest = hash(body);
     const previous = this.last;
     if (
@@ -240,6 +266,33 @@ export class SessionJournal {
   private corrupt(reason: string): Error {
     return new Error(`Cannot recover session ${this.sessionId} from ${JOURNAL}: ${reason}`);
   }
+}
+
+function validAsyncResults(value: unknown): value is AsyncWorkResultState[] {
+  if (!Array.isArray(value)) return false;
+  const identities = new Set<string>();
+  return value.every((result: unknown) => {
+    if (!result || typeof result !== "object") return false;
+    const entry = result as Partial<AsyncWorkResultState>;
+    const notification = entry.notification;
+    if (
+      typeof entry.delivered !== "boolean" ||
+      typeof entry.suppressed !== "boolean" ||
+      !notification ||
+      typeof notification !== "object" ||
+      typeof notification.id !== "string" ||
+      typeof notification.result !== "string" ||
+      (notification.kind !== "background" && notification.kind !== "subagent") ||
+      !["completed", "error", "interrupted", "timeout"].includes(notification.status) ||
+      (notification.ownerRunId !== undefined && typeof notification.ownerRunId !== "string") ||
+      (notification.taskId !== undefined && typeof notification.taskId !== "string")
+    )
+      return false;
+    const identity = `${notification.kind}:${notification.id}`;
+    if (identities.has(identity)) return false;
+    identities.add(identity);
+    return true;
+  });
 }
 
 /** Low-level legacy appenders must not write unframed data into a checkpoint journal. */
