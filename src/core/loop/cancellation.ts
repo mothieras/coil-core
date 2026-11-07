@@ -69,6 +69,7 @@ export async function cancellableDelay(ms: number, signal?: AbortSignal): Promis
 export class ExecutionScope {
   readonly controller = new AbortController();
   private readonly pending = new Map<Promise<unknown>, string>();
+  private readonly waitErrors = new WeakSet<ExecutionStoppedError>();
   private readonly errors: string[] = [];
   get signal(): AbortSignal {
     return this.controller.signal;
@@ -81,7 +82,9 @@ export class ExecutionScope {
       (error: unknown) => {
         this.pending.delete(promise);
         if (
-          (error instanceof ExecutionStoppedError && error.confirmation === "unconfirmed") ||
+          (error instanceof ExecutionStoppedError &&
+            error.confirmation === "unconfirmed" &&
+            !this.waitErrors.has(error)) ||
           (this.signal.aborted &&
             !(error instanceof ExecutionStoppedError) &&
             !(error instanceof Error && error.name === "AbortError"))
@@ -93,12 +96,17 @@ export class ExecutionScope {
     try {
       return await waitWithSignal(promise, this.signal);
     } catch (error) {
-      if (error instanceof ExecutionStoppedError)
-        throw new ExecutionStoppedError(
+      if (error instanceof ExecutionStoppedError) {
+        const stopped = new ExecutionStoppedError(
           error.reason,
           resource,
           this.pending.has(promise) ? "unconfirmed" : error.confirmation,
         );
+        // Nested waits observe this stop too; the retained operation, rather than
+        // a temporary end to waiting, determines the final cleanup confirmation.
+        this.waitErrors.add(stopped);
+        throw stopped;
+      }
       throw error;
     }
   }

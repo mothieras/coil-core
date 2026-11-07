@@ -1,44 +1,63 @@
 #!/usr/bin/env tsx
 /**
- * Minimal headless embedding: read one prompt from argv, run a single agent
- * loop turn against the default Anthropic provider, and print the result.
+ * 通过构建产物运行一个 headless 轮次；--scripted 使用临时目录，无需凭据。
  *
- * Requires ANTHROPIC_API_KEY + MODEL_ID in the environment (see .env.example).
+ * 默认使用 .env 中的模型与 provider 凭据（参见 .env.example）。
  *
  *   pnpm build
+ *   pnpm exec tsx examples/headless-agent.ts --scripted "hello"
  *   pnpm exec tsx examples/headless-agent.ts "explain this repo's entry point"
  */
-import { Agent, agentLoop, createDefaultProvider, createAppContext } from "../src/core/index.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { Agent, agentLoop, createDefaultProvider, createAppContext } from "coil-core";
+import { createScriptedProvider } from "./scripted-provider.js";
 
 async function main(): Promise<void> {
-  const prompt = process.argv[2];
+  const scripted = process.argv[2] === "--scripted";
+  const prompt = process.argv[scripted ? 3 : 2];
   if (!prompt) {
-    console.error('usage: pnpm exec tsx examples/headless-agent.ts "your prompt"');
-    process.exit(1);
+    throw new Error('usage: pnpm exec tsx examples/headless-agent.ts [--scripted] "your prompt"');
   }
 
-  const app = createAppContext(process.cwd(), {});
-  const agent = new Agent({
-    id: "headless",
-    system: "You are a concise coding agent. Use tools when useful, then answer.",
-    workspaceRoot: process.cwd(),
-    toolRuntime: app.toolRuntime,
-    provider: createDefaultProvider(),
-    hooks: app.hooks,
-    messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
-  });
-
+  const workspaceRoot = scripted
+    ? await mkdtemp(path.join(tmpdir(), "coil-headless-demo-"))
+    : process.cwd();
   try {
-    const result = await agentLoop(agent, {});
-    const text = Array.isArray(result.content)
-      ? result.content
+    const app = createAppContext(workspaceRoot);
+    try {
+      const agent = new Agent({
+        id: "headless",
+        system: "You are a concise coding agent. Use tools when useful, then answer.",
+        workspaceRoot,
+        toolRuntime: app.toolRuntime,
+        provider: scripted
+          ? createScriptedProvider(() => ({
+              content: [{ type: "text", text: `本地演示已收到：${prompt}` }],
+              stopReason: "stop",
+            }))
+          : createDefaultProvider(),
+        hooks: app.hooks,
+        messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+      });
+      const result = await agentLoop(agent, {});
+      if (result.stopReason !== "stop") throw new Error(`Run ended: ${result.stopReason}`);
+      console.log(
+        result.content
           .map((block) => (block.type === "text" ? block.text : `[${block.type}]`))
-          .join("\n")
-      : String(result.content);
-    console.log(text);
+          .join("\n"),
+      );
+    } finally {
+      await app.agentRuntime.close();
+      await app.closeToolProviders();
+    }
   } finally {
-    await app.closeToolProviders();
+    if (scripted) await rm(workspaceRoot, { recursive: true, force: true });
   }
 }
 
-void main();
+void main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});

@@ -1,16 +1,61 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { SessionController } from "../src/core/session/controller.js";
 import { SessionStore } from "../src/core/session/store/sessionStore.js";
 import { ExecutionStoppedError } from "../src/core/loop/cancellation.js";
+import { createPermissionChecker } from "../src/core/permission/permission.js";
+import { createPermissionBridge } from "../src/tui/permissionBridge.js";
 import { fakeProvider, textMessage, toolCall, toolCallMessage } from "./helpers/pi.js";
 
 async function workspace() {
   return mkdtemp(path.join(tmpdir(), "coil-cancel-"));
 }
+
+test(
+  "cancelling the real permission pipeline confirms cleanup and allows session close",
+  { timeout: 10_000 },
+  async () => {
+    const dir = await workspace();
+    const bridge = createPermissionBridge();
+    const requested = Promise.withResolvers<void>();
+    bridge.subscribe(() => {
+      if (bridge.current()) requested.resolve();
+    });
+    let calls = 0;
+    const controller = await SessionController.createNew({
+      workspaceRoot: dir,
+      title: "permission pipeline",
+      provider: fakeProvider(() =>
+        ++calls === 1
+          ? toolCallMessage([toolCall("bash", { command: "rm demo-file" })])
+          : textMessage("done"),
+      ),
+      checkPermission: createPermissionChecker(dir, (name, input, reason, context) =>
+        bridge.request(name, input, reason, context),
+      ),
+    });
+    try {
+      await writeFile(path.join(dir, "demo-file"), "keep\n");
+      const turn = controller.handleUserMessage("Request permission.");
+      await requested.promise;
+      const cancellation = await controller.cancelRun();
+      assert.equal(cancellation.cleanup?.status, "confirmed");
+      assert.deepEqual(cancellation.cleanup?.errors, []);
+      assert.equal((await turn).run.status, "interrupted");
+      assert.equal(bridge.current(), null);
+      assert.equal(await readFile(path.join(dir, "demo-file"), "utf8"), "keep\n");
+      await controller.handleUserMessage("Continue.");
+      assert.equal(calls, 2);
+      await controller.close();
+    } finally {
+      await controller.close().catch(() => undefined);
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("public controller cancels permission wait, removes the request and permits a legal next turn", async () => {
   const dir = await workspace();

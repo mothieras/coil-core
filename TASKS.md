@@ -1,8 +1,8 @@
 # Agent runtime 架构优化与可靠性打磨任务清单
 
-状态：M0–M4 已完成，M5 未开始。依据：[SPEC.md](SPEC.md)、[PLAN.md](PLAN.md)。代码基线：`54551bc`。
+状态：M0–M5 已完成，M5 已获授权提交并推送。依据：[SPEC.md](SPEC.md)、[PLAN.md](PLAN.md)。代码基线：`54551bc`。
 
-用户先前授权完成 M4（T037–T043）并停在提交前，审阅改动后已授权提交。M4 从 `adfc095` 的干净工作区开始，串行实施；SPEC 第 9.10 节记录异步结果交接与唤醒决策。M0–M3 的授权与验证记录保留供追溯。
+用户先前授权完成 M5（T044–T047）并停在提交前，现已授权提交并推送。M5 从 `c4cbce3` 的干净工作区开始，串行实施，无子代理。SPEC 第 9.11 节记录交付验证和真实终端检查发现的收尾修正；M0–M4 的授权与验证记录保留供追溯。
 
 ## 1. 使用约定
 
@@ -353,29 +353,42 @@ pnpm format:check
 
 ## 7. M5：交付与工程展示
 
-- [ ] **T044 完善无凭据演示和既有示例**
+- [x] **T044 完善无凭据演示和既有示例**
   - 来源：PLAN M5；SPEC G6。依赖：T043。
-  - 范围：`examples/headless-agent.ts`、`examples/custom-tool.ts`、拟新增 `examples/cancel-run.ts`、`examples/recover-session.ts`。
+  - 范围：`examples/headless-agent.ts`、`examples/custom-tool.ts`、`examples/cancel-run.ts`、`examples/recover-session.ts`、共用的 `examples/scripted-provider.ts`。
   - 完成条件：既有示例兼容当前 interface；取消和恢复演示使用 scripted provider、真实本地进程和临时目录；未知副作用需要核实，不自动重跑。
   - 验证：实际运行新演示且无凭据依赖；已有真实模型示例如缺凭据，明确未验证范围，并用构建产物的无凭据消费检查验证公共 interface。
+  - 证据：`pnpm build` 后，在 `env -i` 仅保留 PATH、TMPDIR 并设置 `DOTENV_CONFIG_PATH=/dev/null` 的环境中，按 README 顺序运行四个 `pnpm exec tsx examples/<name>.ts` 命令，均退出 0。headless 使用 `--scripted hello`，输出本地回答；custom-tool 返回 completed/invalid_input；cancel-run 断言 interrupted/aborted/confirmed、模型只调用一次、真实 PID 已退出且标记文件仍在。
+  - 恢复演示：通过公共导出启动 controller，在工具写入文件并发出 IPC 信号后 SIGKILL 工作进程；重新打开后，用户轮次和自动唤醒都因未知结果被拒绝，模型/工具调用数为零。读取文件核实后保存 verified 决定，显式提交新消息，再次打开验证决定仍有效，文件始终只有一次副作用。全部临时数据和演示进程已清理。
+  - 限制：未使用线上模型或凭据；默认模型分支仅实测缺少 MODEL_ID 时退出 1 并显示配置错误。示例的 TypeScript 类型另以 `pnpm exec tsc --ignoreConfig --noEmit --module NodeNext --moduleResolution NodeNext --target esnext --strict --skipLibCheck examples/*.ts` 检查；不把本地 provider 当成线上厂商验证。
 
-- [ ] **T045 检查公共导出、懒配置与构建消费**
+- [x] **T045 检查公共导出、懒配置与构建消费**
   - 来源：PLAN M5；SPEC A3、兼容性要求。依赖：T044。
   - 范围：各 `index.ts`、`src/core/index.ts`、配置模块、构建产物和示例。
   - 完成条件：只暴露必要 interface、core 无 UI 依赖；缺少模型配置时 import 不失败，首次使用仍按约定报错；所有新增目录有正确 barrel，无新增手写 `.js` 源码。
   - 验证：`pnpm build` 后通过公共导出运行无凭据消费者；相关边界与 startup 测试通过，不能仅以源码测试代替构建集成。
+  - 证据：新增 `tests/startup-error.test.ts` 隔离进程检查：清除模型配置并禁用 .env 加载，导入 core 和创建 app 不失败；Node resolve hook 拒绝 React、Ink 或 TUI 依赖，首次创建默认 provider 才报 MODEL_ID 错误。连同 `tests/builtin-tool-ownership.test.ts`、`tests/runtime-boundaries.test.ts` 共 34 项聚焦检查通过。
+  - 构建消费：在同样无凭据环境中用 `pnpm exec node --input-type=module` 导入 `coil-core`，确认解析到 `dist/core/index.js`，拒绝回读 `src/core/` 和 UI 依赖，并验证懒配置及 app 关闭。`ExecutionScope`、`SessionJournal`、`SessionPersistence` 和 `runTui` 均未从公共入口暴露；四个示例也实际消费构建产物。
+  - 范围审查：24 个包含实现源码的 core 目录均有 barrel；未新增 core 目录、手写 .js 或 core .tsx，pi-ai 运行时接入仍限于 providers。保留现有公共导出，无新增兼容层或 UI 依赖。
 
-- [ ] **T046 更新公共说明并核对规格声明**
+- [x] **T046 更新公共说明并核对规格声明**
   - 来源：PLAN M5；SPEC G6、最终完成定义。依赖：T045。
   - 范围：`README.md`、SPEC 设计决策与限制、PLAN 阶段汇总。
   - 完成条件：说明模块职责、嵌入方式、取消/恢复语义、已验证平台、迁移方式与限制；只描述有证据的能力，不宣称沙箱、自动回滚或跨系统 exactly-once。
   - 验证：按 README 顺序复查命令、输出和示例；检查日志与素材不含凭据或用户数据，文档和实现一致。
+  - 证据：README 先提供四个无凭据命令及预期输出，再说明真实模型配置；补齐模块职责、低层/会话入口的资源归属、懒配置、恢复决定不自动续跑、迁移步骤和进程组边界。SPEC 9.11 记录 M5 的收尾修正和证据范围，PLAN 同步交付项目。
+  - 平台核对：通过 GitHub 连接器复核 README 已链接的 run `42363374521` 及 job 日志：提交 `138be65`、Ubuntu 26.04.1 x64、Node 22.23.4、324 项测试通过，包含真实 shell/进程组后代清理。此为已有 M4 基线证据；M5 改动仅在本机 macOS 验证，未触发新 CI。Windows、脱离进程组的后代和线上模型不纳入声明。演示只输出固定合成内容和结果分类，无凭据或用户数据。
 
-- [ ] **T047 完成最终验收与范围审查**
+- [x] **T047 完成最终验收与范围审查**
   - 来源：PLAN M5；SPEC V01–V16、最终完成定义。
   - 依赖：T020、T026、T036、T043、T044、T045、T046。
   - 完成条件：通用阶段检查、构建、相关示例、真实终端检查全部按范围完成；审查最终 diff，无遗留重复路径、无关修改或未披露阻塞；更新 PLAN M5 汇总。
   - 验证：逐项核对下一节映射，留下实际证据位置，区分通过/失败/未执行。不得自动提交、推送或发布；有已知反例时保持本任务未完成。
+  - 最终检查：2026-11-08，本机 macOS arm64、Node 24.21.0、pnpm 11.0.9；`TERM=xterm-256color pnpm test` 327 项通过，0 失败/取消/跳过。`pnpm exec tsc --noEmit`、`pnpm typecheck:tests`、`pnpm lint`、`pnpm format:check`、`pnpm build` 和 T044 的示例类型检查均退出 0；构建导入消费者及四个无凭据示例通过。README、SPEC、PLAN、TASKS 的本地 Markdown 链接及最终 diff 检查通过。
+  - V01/V04：`agent-runtime`、`run-transitions`、`runtime-lifecycle`、`session-controller`；V02/V03：`pi-provider` 的真实本地 HTTP 取消、`cancellation-waits`、`session-cancellation`；V05/V06：`process-cancellation`、`owned-work-cancellation`、`tool-cancellation`、`mcp-cancellation`。文件均位于 `tests/` 并带 `.test.ts` 后缀，已纳入本次全量检查。
+  - V07/V08：`tests/tool-runtime.test.ts`、`tests/tool-batches.test.ts`、`tests/task-tools.test.ts`、`tests/mcp-provider.test.ts`；V09–V12：`tests/session-persistence.test.ts`、`tests/session-crash-recovery.test.ts`、`tests/session-legacy-migration.test.ts`，包含原五个真实崩溃窗口及三个异步交接窗口。V13–V16：`tests/subagent-runner.test.ts`、`tests/owned-work-cancellation.test.ts`、`tests/session-async-work.test.ts`、`tests/async-result-persistence.test.ts`、`tests/session-async-close.test.ts`、`tests/mcp-cancellation.test.ts`。
+  - 真实终端：用 `tests/fixtures/tui-cancellation.ts` 在 80×24、NO_COLOR=1、FORCE_COLOR=0 的实际 Ink PTY 检查权限弹窗取消、前台 shell 与后代退出、Esc 后后台两个 PID 仍存活、Ctrl+D 后后台退出且 session 保存为 closed；无 ANSI 颜色。初次检查发现实际权限管线取消会错误保留内层等待的暂时未确认异常，导致关闭失败；新增集成测试先复现，`src/core/loop/cancellation.ts` 以 scope 内身份识别等待异常后复验通过，真实消费者的未确认错误仍由新增回归保留，见 SPEC 9.11。
+  - 范围与限制：生产修改仅为上述私有收尾计数修正；没有改动公共导出、终态所有权、持久化协议、依赖或 TUI 布局。无剩余验收阻塞；M5 补丁未运行新 Linux CI、Windows 或线上模型，已有 Linux 基线证据见 T046。临时进程和 workspace 已回收；实施与验收阶段未暂存、提交、推送或发布，用户现已授权提交并推送。
 
 ## 8. 验收追踪与阶段出口
 
@@ -407,6 +420,6 @@ pnpm format:check
 | M2   | T021–T026 | T026 | 已完成   |
 | M3   | T027–T036 | T036 | 已完成   |
 | M4   | T037–T043 | T043 | 已完成   |
-| M5   | T044–T047 | T047 | 未开始   |
+| M5   | T044–T047 | T047 | 已完成   |
 
-M0–M4 的 T001–T043 已完成，用户已授权提交 M4。下一项为 M5 的 T044，不在本次授权范围。
+M0–M5 的 T001–T047 全部完成。M5 改动与验证记录已保留，用户已授权提交并推送。

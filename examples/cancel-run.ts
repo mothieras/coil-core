@@ -4,44 +4,20 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Agent, createAgentRun, createAppContext, type Provider } from "coil-core";
+import { Agent, createAgentRun, createAppContext } from "coil-core";
+import { createScriptedProvider } from "./scripted-provider.js";
 
 const workspace = await mkdtemp(path.join(tmpdir(), "coil-cancel-demo-"));
 const app = createAppContext(workspace);
 const command = `node -e 'require("node:fs").writeFileSync("ready", String(process.pid)); setInterval(() => {}, 1000)'`;
-const provider: Provider = {
-  model: {
-    id: "scripted",
-    name: "Local cancellation demo",
-    api: "anthropic-messages",
-    provider: "anthropic",
-    baseUrl: "http://127.0.0.1",
-    reasoning: false,
-    input: ["text"],
-    contextWindow: 200_000,
-    maxTokens: 1024,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  },
-  async generate() {
-    return {
-      role: "assistant",
-      api: "anthropic-messages",
-      provider: "anthropic",
-      model: "scripted",
-      stopReason: "toolUse",
-      timestamp: Date.now(),
-      content: [{ type: "toolCall", id: "demo-shell", name: "bash", arguments: { command } }],
-      usage: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      },
-    };
-  },
-};
+let requests = 0;
+const provider = createScriptedProvider(() => {
+  requests++;
+  return {
+    content: [{ type: "toolCall", id: "demo-shell", name: "bash", arguments: { command } }],
+    stopReason: "toolUse",
+  };
+});
 const agent = new Agent({
   id: "demo",
   toolRuntime: app.toolRuntime,
@@ -74,12 +50,16 @@ try {
   assert.ok(pid, "The managed process must report readiness");
   console.log("受控进程已就绪，正在取消运行。");
   const cancellation = await app.agentRuntime.cancelRun(run.id);
-  await running;
+  const { result } = await running;
   console.log(
     `run=${run.status}, reason=${run.stopReason}, cleanup=${cancellation.cleanup?.status}`,
   );
   assert.equal(cancellation.cleanup?.status, "confirmed");
+  assert.equal(run.status, "interrupted");
+  assert.equal(result.stopReason, "aborted");
+  assert.equal(requests, 1, "Cancellation must not dispatch another model request");
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  assert.equal(await readFile(path.join(workspace, "ready"), "utf8"), String(pid));
   console.log("已确认进程退出。取消不会回滚已经发生的副作用。");
 } finally {
   await app.agentRuntime.close();

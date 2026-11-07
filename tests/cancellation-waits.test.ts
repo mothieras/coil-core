@@ -8,6 +8,7 @@ import { Agent } from "../src/core/agent/agent.js";
 import { AgentRuntime } from "../src/core/agent/runtime.js";
 import { createAgentRun } from "../src/core/agent/run.js";
 import { createRuntimeLifecycleCollector } from "../src/core/agent/lifecycle.js";
+import { ExecutionScope, ExecutionStoppedError } from "../src/core/loop/cancellation.js";
 import { createPermissionBridge } from "../src/tui/permissionBridge.js";
 import { fakeProvider, textMessage, userMessage } from "./helpers/pi.js";
 
@@ -17,6 +18,27 @@ const emptyRuntime = {
 } as never;
 const record = () =>
   createAgentRun({ agentId: "lead", agentKind: "lead", trigger: { type: "user_message" } });
+
+test("nested waits preserve a consumer's stop uncertainty after the operation settles", async () => {
+  const scope = new ExecutionScope();
+  const operation = new Promise<never>((_resolve, reject) => {
+    scope.signal.addEventListener(
+      "abort",
+      () => reject(new ExecutionStoppedError("aborted", "remote", "unconfirmed")),
+      { once: true },
+    );
+  });
+  const stopped = assert.rejects(scope.wait(scope.wait(operation, "remote"), "tool"));
+  scope.controller.abort(new ExecutionStoppedError());
+  await stopped;
+  await scope.settled();
+  const cleanup = await scope.cleanup(Date.now());
+  assert.equal(cleanup.status, "unconfirmed");
+  assert.deepEqual(cleanup.resources, []);
+  assert.deepEqual(cleanup.errors, [
+    "remote: ExecutionStoppedError: Execution stopped: aborted (remote); stop unconfirmed",
+  ]);
+});
 
 test("cancelled backoff has no later model retries", async () => {
   const called = Promise.withResolvers<void>();
