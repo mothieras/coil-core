@@ -32,5 +32,8 @@ coverage/
 # Design & product discussion (private; contains LLM design sessions)
 DESIGN.md
 PRODUCT.md
+/PLAN.md
+/TASKS.md
+/SPEC.md
 .impeccable/
 artifacts/
