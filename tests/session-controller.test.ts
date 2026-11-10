@@ -353,7 +353,7 @@ test("SessionController.writeReport writes report.md and records report_written"
   }
 });
 
-test("SessionController.handleSlashCommand returns notices and writes reports", async () => {
+test("SessionController.handleSlashCommand returns notices, writes reports, and handles exit aliases", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "session-controller-"));
   try {
     const controller = await SessionController.createNew({
@@ -374,6 +374,10 @@ test("SessionController.handleSlashCommand returns notices and writes reports", 
       await readFile(report.report.path, "utf8").then((text) => text.includes("# Session report")),
       true,
     );
+
+    const exit = await controller.handleSlashCommand("/exit");
+    assert.equal(exit.action, "exit");
+    assert.deepEqual(await controller.handleSlashCommand("/quit"), exit);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

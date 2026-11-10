@@ -19,6 +19,7 @@ const COMMANDS: readonly CommandSuggestion[] = [
   { command: "/compact", description: "compact context" },
   { command: "/report", description: "write report" },
   { command: "/exit", description: "save and quit" },
+  { command: "/quit", description: "save and quit" },
 ];
 
 // Pasting is editing, never submission. Preserve code blocks and normalize CRLF

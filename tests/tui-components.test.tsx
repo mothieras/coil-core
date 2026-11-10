@@ -217,6 +217,10 @@ test("input helpers classify commands, suggestions, and pasted newlines", () => 
     commandSuggestions("/res").map((item) => item.command),
     ["/resume"],
   );
+  assert.deepEqual(
+    commandSuggestions("/q").map((item) => item.command),
+    ["/quit"],
+  );
   assert.deepEqual(commandSuggestions("plain text"), []);
   assert.deepEqual(commandSuggestions("/resume 2"), []);
   assert.equal(normalizePastedInput("/help\r"), "/help\n");
