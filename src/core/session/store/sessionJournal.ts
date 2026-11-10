@@ -4,7 +4,7 @@ import path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type { SessionEvent } from "../types.js";
 import type { AsyncWorkResultState } from "../../async/asyncWorkInbox.js";
-import { writeAtomic } from "./atomicFile.js";
+import { writeAtomic } from "../../state/atomicFile.js";
 
 type ContextRef = { slot: 0 | 1; digest: string };
 type JournalHeader = { type: "session_journal"; version: 1; sessionId: string; legacy: boolean };

@@ -13,6 +13,8 @@ export function App({ session }: { session: UseSessionApi }): React.ReactElement
     phase,
     busy,
     permission,
+    login,
+    setupMessage,
     input,
     setInput,
     submit,
@@ -40,7 +42,7 @@ export function App({ session }: { session: UseSessionApi }): React.ReactElement
     }
     if (key.escape && busy && permission === null) {
       if (phase === "waiting-async") interrupt();
-      else if (phase === "thinking" || phase === "auto-waking") cancel();
+      else if (login || phase === "thinking" || phase === "auto-waking") cancel();
     }
   });
   const sessionKey = state.snapshot.session?.id ?? "none";
@@ -51,7 +53,7 @@ export function App({ session }: { session: UseSessionApi }): React.ReactElement
           <Text color={TUI_COLORS.primary} bold>
             {TUI_SYMBOLS.brand} coil
           </Text>
-          <Text color={TUI_COLORS.muted}> · {state.model ?? "unknown model"}</Text>
+          <Text color={TUI_COLORS.muted}> · {state.model ?? "no model selected"}</Text>
         </Text>
         <Text color={TUI_COLORS.muted} wrap="truncate-middle">
           {workspace}
@@ -61,7 +63,7 @@ export function App({ session }: { session: UseSessionApi }): React.ReactElement
         {state.snapshot.conversationMessages.length === 0 && (
           <Box paddingX={1} marginY={1}>
             <Text color={TUI_COLORS.muted}>
-              Ask about {path.basename(workspace)}, or describe a change.
+              {setupMessage ?? `Ask about ${path.basename(workspace)}, or describe a change.`}
             </Text>
           </Box>
         )}
@@ -70,7 +72,7 @@ export function App({ session }: { session: UseSessionApi }): React.ReactElement
         ))}
       </ScrollView>
       <ScrollView
-        key={`${sessionKey}:${permission?.id ?? "composer"}`}
+        key={`${sessionKey}:${permission?.id ?? (login ? "login" : "composer")}`}
         width={width}
         maxHeight={Math.max(3, height - 6)}
         footer
@@ -86,6 +88,7 @@ export function App({ session }: { session: UseSessionApi }): React.ReactElement
           onSubmit={submit}
           history={history}
           permission={permission}
+          login={login}
           onPermissionDecision={decide}
           width={Math.max(1, width - 1)}
         />

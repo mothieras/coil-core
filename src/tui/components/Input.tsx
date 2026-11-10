@@ -3,7 +3,7 @@ import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { TUI_COLORS, TUI_SYMBOLS } from "../theme.js";
 
-export type InputClass = { kind: "empty" | "message" | "slash" | "resume"; arg: string };
+export type InputClass = { kind: "empty" | "message" | "slash" | "resume" | "login"; arg: string };
 
 export type CommandSuggestion = { command: string; description: string };
 
@@ -14,6 +14,7 @@ const COMMANDS: readonly CommandSuggestion[] = [
   { command: "/subagents", description: "list subagents" },
   { command: "/resume", description: "switch session" },
   { command: "/recover", description: "review unknown outcomes" },
+  { command: "/login", description: "sign in and select a model" },
   { command: "/ping", description: "check provider" },
   { command: "/compact", description: "compact context" },
   { command: "/report", description: "write report" },
@@ -29,6 +30,7 @@ export function normalizePastedInput(next: string): string {
 export function classifyInput(text: string): InputClass {
   const trimmed = text.trim();
   if (trimmed === "") return { kind: "empty", arg: "" };
+  if (/^\/login(?:\s|$)/.test(trimmed)) return { kind: "login", arg: trimmed.slice(6).trim() };
   if (trimmed === "/resume" || trimmed.startsWith("/resume ")) {
     return { kind: "resume", arg: trimmed.slice("/resume".length).trim() };
   }

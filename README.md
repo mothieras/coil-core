@@ -27,7 +27,11 @@ pnpm exec tsx examples/recover-session.ts
 | [cancel-run](examples/cancel-run.ts)           | 启动真实进程后取消，输出 `interrupted`、`aborted`、`confirmed`，检查进程已退出                                         |
 | [recover-session](examples/recover-session.ts) | 在文件副作用发生、结果保存前终止真实进程；恢复后先阻止继续执行，核实文件并保存决定后才接受新消息，检查副作用只发生一次 |
 
-使用真实模型和 TUI 时，再配置环境：
+运行 `pnpm dev` 启动 TUI。输入 `/login` 选择服务商、登录方式和模型，也可以用 `/login <provider>` 直接进入指定服务商的登录流程。可用的登录方式由 [pi-ai](https://github.com/earendil-works/pi/blob/main/packages/ai/README.md#auth) 提供，包括 API Key 和浏览器授权。输入密钥时会遮罩字符，按 Esc 可取消。
+
+保存后即可在当前会话使用新模型。输入 `/ping` 可发出测试请求。配置按工作目录保存在 `~/.coil/state/auth/`，文件权限为 `0600`。在同一工作目录重启 TUI 时，优先使用已保存的登录配置。
+
+也可以通过环境变量配置模型，供未保存登录配置的 TUI、headless 示例或嵌入式宿主使用：
 
 ```bash
 cp .env.example .env
@@ -35,7 +39,7 @@ cp .env.example .env
 pnpm dev
 ```
 
-默认通过 [pi-ai](https://github.com/earendil-works/pi) 使用 Anthropic。设置 `COIL_LLM_PROVIDER` 可选择已安装 pi-ai 的其他内置 provider，同时配置该 provider 的凭据和目录中的 `MODEL_ID`。使用 Anthropic 兼容网关时保留 `COIL_LLM_PROVIDER=anthropic`，设置 `ANTHROPIC_BASE_URL`、网关密钥和模型 ID。配置示例见 [.env.example](.env.example)。
+环境变量方式默认使用 Anthropic。设置 `COIL_LLM_PROVIDER` 可选择已安装 pi-ai 的其他内置 provider，同时配置该 provider 的凭据和目录中的 `MODEL_ID`。使用 Anthropic 兼容网关时保留 `COIL_LLM_PROVIDER=anthropic`，设置 `ANTHROPIC_BASE_URL`、网关密钥和模型 ID。配置示例见 [.env.example](.env.example)。
 
 ## 嵌入应用
 

@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import { throwIfAborted } from "../../loop/cancellation.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { getModel } from "../../config/index.js";
 import { createDefaultProvider, textGenerator } from "../../providers/index.js";
 import type { Agent } from "../../agent/agent.js";
 import {
@@ -208,11 +207,14 @@ export class SessionCommands {
   }
 
   async ping(): Promise<SessionCommandResult> {
+    let modelId = "unconfigured";
     try {
       const start = Date.now();
       const provider = this.leadAgent.provider ?? createDefaultProvider();
+      const model = provider.model;
+      modelId = model.id;
       const message = await provider.generate(
-        provider.model,
+        model,
         {
           messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
           tools: [],
@@ -225,7 +227,7 @@ export class SessionCommands {
       return {
         action: "notice",
         title: "Ping OK",
-        body: `${elapsed}ms model=${getModel()} ${usage}`,
+        body: `${elapsed}ms model=${modelId} ${usage}`,
       };
     } catch (error) {
       throwIfAborted(this.signal);
@@ -233,7 +235,7 @@ export class SessionCommands {
       return {
         action: "notice",
         title: "Ping Failed",
-        body: `model=${getModel()} error=${message}`,
+        body: `model=${modelId} error=${message}`,
       };
     }
   }

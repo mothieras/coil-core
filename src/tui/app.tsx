@@ -1,8 +1,8 @@
 import React from "react";
 import { useApp } from "ink";
-import { getModel } from "../core/config/index.js";
 import { createPermissionChecker } from "../core/permission/permission.js";
 import type { CheckPermissionFn } from "../core/permission/types.js";
+import { openModelConnection } from "../core/providers/index.js";
 import { SessionController } from "../core/session/controller.js";
 import { SessionStore } from "../core/session/store/sessionStore.js";
 import { loadConfiguredMcpTools } from "../core/tools/mcp/index.js";
@@ -14,9 +14,7 @@ import { renderTerminal } from "./terminal.js";
 
 export async function runTui(): Promise<void> {
   const workspaceRoot = process.cwd();
-  // Resolve lazy provider configuration before creating runtime state so a
-  // setup error cannot leave an empty active session behind.
-  const model = getModel();
+  const modelConnection = await openModelConnection(workspaceRoot);
   const store = new SessionStore(workspaceRoot);
   const bridge = createPermissionBridge();
   const checkPermission: CheckPermissionFn = createPermissionChecker(
@@ -33,6 +31,7 @@ export async function runTui(): Promise<void> {
       workspaceRoot,
       store,
       checkPermission,
+      provider: modelConnection.provider,
       toolProviderResults: providers,
     });
   } catch (error) {
@@ -53,7 +52,7 @@ export async function runTui(): Promise<void> {
         initialController: controller,
         loadProviders,
         onExit: () => exit(),
-        model,
+        modelConnection,
       });
       return <App session={session} />;
     }

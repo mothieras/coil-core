@@ -21,6 +21,8 @@ export type PiAiComplete = (
 ) => Promise<AssistantMessage>;
 
 export type PiAiProviderDeps = {
+  /** Explicit model selection, independent of the environment's model and fallback. */
+  model?: Model<Api> | undefined;
   complete?: PiAiComplete | undefined;
   resolveModel?: ((modelId: string) => Model<Api>) | undefined;
   fetch?: FetchFunction | undefined;
@@ -38,8 +40,8 @@ function supportsFetchCapture(api: Api): boolean {
  */
 export function createPiAiProvider(deps: PiAiProviderDeps = {}): Provider {
   const resolve = deps.resolveModel ?? resolveModel;
-  const model = resolve(getModel());
-  const fallbackId = getFallbackModel();
+  const model = deps.model ?? resolve(getModel());
+  const fallbackId = deps.model === undefined ? getFallbackModel() : undefined;
   const baseFetch = deps.fetch ?? globalThis.fetch;
 
   return {

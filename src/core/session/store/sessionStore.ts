@@ -10,7 +10,7 @@ import type {
 } from "../types.js";
 import { createEmptySessionSnapshot } from "../projection/projection.js";
 import { importLegacyAnthropicMessages } from "./legacyMessages.js";
-import { writeAtomic } from "./atomicFile.js";
+import { writeAtomic } from "../../state/atomicFile.js";
 import { hasJournalHeader } from "./sessionJournal.js";
 
 export type SessionListItem = {

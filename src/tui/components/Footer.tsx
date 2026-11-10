@@ -3,10 +3,12 @@ import { Box, Text } from "ink";
 import type { SessionSnapshot, TaskProjection } from "../../core/session/types.js";
 import type { TurnPhase } from "../sessionActions.js";
 import type { PermissionRequest } from "../permissionBridge.js";
+import type { LoginView } from "../useLogin.js";
 import { TUI_BORDER_STYLE, TUI_COLORS, TUI_SYMBOLS } from "../theme.js";
 import { RunningActivity } from "./RunningActivity.js";
 import { StatusBar } from "./StatusBar.js";
 import { Input } from "./Input.js";
+import { LoginPanel } from "./LoginPanel.js";
 import { PermissionModal } from "./PermissionModal.js";
 
 export type FooterProps = {
@@ -19,6 +21,7 @@ export type FooterProps = {
   onSubmit: (v: string) => void;
   history?: readonly string[] | undefined;
   permission: PermissionRequest | null;
+  login?: LoginView | null | undefined;
   onPermissionDecision: (allow: boolean) => void;
   width?: number | undefined;
 };
@@ -34,6 +37,7 @@ export function Footer(props: FooterProps): React.ReactElement {
     onSubmit,
     history,
     permission,
+    login,
     onPermissionDecision,
     width = 80,
   } = props;
@@ -61,14 +65,18 @@ export function Footer(props: FooterProps): React.ReactElement {
           borderColor={TUI_COLORS.border}
           paddingX={1}
         >
-          <Input
-            value={input}
-            onChange={onInputChange}
-            onSubmit={onSubmit}
-            busy={busy}
-            disabled={phase === "closing" || phase === "close-failed"}
-            history={history}
-          />
+          {login ? (
+            <LoginPanel view={login} />
+          ) : (
+            <Input
+              value={input}
+              onChange={onInputChange}
+              onSubmit={onSubmit}
+              busy={busy}
+              disabled={phase === "closing" || phase === "close-failed"}
+              history={history}
+            />
+          )}
         </Box>
       )}
       <StatusBar snapshot={snapshot} model={model} width={width} />
@@ -82,7 +90,9 @@ export function Footer(props: FooterProps): React.ReactElement {
           <Text color={TUI_COLORS.muted}>
             {permission
               ? "Scroll to review · Ctrl+C cancel · Ctrl+D close"
-              : footerHint(phase, busy, width)}
+              : login
+                ? "Esc cancel login · Ctrl+D close"
+                : footerHint(phase, busy, width)}
           </Text>
         </Box>
       }

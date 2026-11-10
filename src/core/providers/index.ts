@@ -1,5 +1,6 @@
 export { createPiAiProvider, createDefaultProvider } from "./pi.js";
 export type { PiAiComplete, PiAiProviderDeps } from "./pi.js";
+export { openModelConnection, type ModelConnection } from "./connection.js";
 export { clearModelCache, resolveModel } from "./model.js";
 export { textGenerator } from "./text.js";
 export type { TextGenerator } from "./text.js";

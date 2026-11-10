@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { CheckPermissionFn } from "../core/permission/types.js";
+import type { ModelConnection } from "../core/providers/index.js";
 import { SessionController } from "../core/session/controller.js";
 import { SessionStore } from "../core/session/store/sessionStore.js";
 import type { ToolProviderLoadResult } from "../core/tools/types.js";
@@ -8,6 +9,7 @@ import { applyTuiCommandResult } from "./commands.js";
 import { drainTurn, matchSession, formatSessionList, type TurnPhase } from "./sessionActions.js";
 import type { PermissionBridge, PermissionRequest } from "./permissionBridge.js";
 import { classifyInput } from "./components/Input.js";
+import { useLogin, type LoginView } from "./useLogin.js";
 
 export type UseSessionOptions = {
   workspaceRoot: string;
@@ -18,6 +20,7 @@ export type UseSessionOptions = {
   loadProviders: () => Promise<ToolProviderLoadResult[]>;
   onExit?: (() => void) | undefined;
   model?: string | undefined;
+  modelConnection?: ModelConnection | undefined;
 };
 
 export type UseSessionApi = {
@@ -25,6 +28,8 @@ export type UseSessionApi = {
   phase: TurnPhase;
   busy: boolean;
   permission: PermissionRequest | null;
+  login?: LoginView | null | undefined;
+  setupMessage?: string | undefined;
   input: string;
   setInput: (v: string) => void;
   submit: (v: string) => void;
@@ -43,12 +48,13 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
   const closingRef = useRef<boolean>(false);
   const seq = useRef<number>(0);
   const historyRef = useRef<string[]>([]);
+  const { modelConnection } = opts;
+  const login = useLogin();
 
   const [state, setState] = useState<TuiState>(() =>
-    createTuiState(
-      opts.initialController.getSnapshot(),
-      opts.model !== undefined ? { model: opts.model } : {},
-    ),
+    createTuiState(opts.initialController.getSnapshot(), {
+      model: modelConnection?.modelId ?? opts.model,
+    }),
   );
   const [phase, setPhase] = useState<TurnPhase>("idle");
   const [busy, setBusy] = useState<boolean>(false);
@@ -116,6 +122,10 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
   }
 
   async function executeMessage(text: string): Promise<void> {
+    if (modelConnection?.setupMessage) {
+      reportError("Model setup", modelConnection.setupMessage);
+      return;
+    }
     interruptRef.current = false;
     try {
       await drainTurn(text, {
@@ -148,6 +158,9 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
         await executeMessage(result.text);
         return;
       }
+      if (modelConnection && result.action === "notice" && result.title === "Help") {
+        result.body += " /login";
+      }
       const id = nextId();
       setState((s) => applyTuiCommandResult(s, result, id).state);
       if (result.action === "exit") {
@@ -157,6 +170,37 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
     } catch (err) {
       if (closingRef.current) setPhase("close-failed");
       reportError("Command", err);
+    } finally {
+      endOperation();
+    }
+  }
+
+  async function runLogin(connection: ModelConnection, arg: string): Promise<void> {
+    if (!beginOperation("Login")) return;
+    try {
+      if (/\s/.test(arg)) {
+        throw new Error("Use /login [provider] and enter credentials when prompted.");
+      }
+      if (controllerRef.current.appContext.subAgentRunner.hasRunning()) {
+        throw new Error(
+          "Wait for running subagents to finish before changing the model connection.",
+        );
+      }
+      const model = await login.start(connection, arg || undefined);
+      if (model !== undefined) {
+        setState((s) =>
+          appendInfoLog(
+            { ...s, model },
+            {
+              id: nextId(),
+              title: "Login saved",
+              detail: `Using ${model}. Run /ping to check the connection.`,
+            },
+          ),
+        );
+      }
+    } catch (err) {
+      reportError("Login", err);
     } finally {
       endOperation();
     }
@@ -208,6 +252,7 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
           sessionId: target.id,
           store: opts.store,
           checkPermission: opts.checkPermission,
+          provider: modelConnection?.provider,
           toolProviderResults: providers,
         });
       } catch (error) {
@@ -229,7 +274,7 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
       historyRef.current = [];
       setInput("");
       setState(
-        createTuiState(next.getSnapshot(), opts.model !== undefined ? { model: opts.model } : {}),
+        createTuiState(next.getSnapshot(), { model: modelConnection?.modelId ?? opts.model }),
       );
     } catch (err) {
       reportError("Resume", err);
@@ -242,6 +287,7 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
     closingRef.current = true;
     setPhase("closing");
     interruptRef.current = true;
+    await login.cancel()?.catch(() => undefined);
     await controllerRef.current.close();
     unsubRef.current?.();
   }
@@ -251,6 +297,11 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
     const c = classifyInput(value);
     setInput("");
     if (c.kind === "empty") return;
+    // Provider credentials are answered in the login prompt, outside input history.
+    if (c.kind === "login" && modelConnection) {
+      void runLogin(modelConnection, c.arg);
+      return;
+    }
     const trimmed = value.trim();
     if (historyRef.current.at(-1) !== trimmed) {
       historyRef.current.push(trimmed);
@@ -260,8 +311,8 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
       void runResume(c.arg);
       return;
     }
-    if (c.kind === "slash") {
-      void runSlash(c.arg);
+    if (c.kind === "slash" || c.kind === "login") {
+      void runSlash(trimmed);
       return;
     }
     void runMessage(c.arg);
@@ -276,6 +327,11 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
   }
 
   function cancel(): void {
+    const loginDone = login.cancel();
+    if (loginDone) {
+      void loginDone.catch(() => undefined);
+      return;
+    }
     interruptRef.current = true;
     void controllerRef.current.cancelRun().catch((error) => reportError("Cancel", error));
   }
@@ -296,6 +352,8 @@ export function useSession(opts: UseSessionOptions): UseSessionApi {
     phase,
     busy,
     permission,
+    login: login.view,
+    setupMessage: modelConnection?.setupMessage,
     input,
     setInput,
     submit,
